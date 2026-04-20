@@ -1,0 +1,54 @@
+# Cloud Run defaults; override env in Console → App Hosting → Environment (see .env.example).
+runConfig:
+  minInstances: 0
+  maxInstances: 10
+  cpu: 1
+  memoryMiB: 512
+env:
+  - variable: SERVICE_ACCOUNT_PRIVATE_KEY
+    secret: SERVICE_ACCOUNT_PRIVATE_KEY
+  - variable: SERVICE_ACCOUNT_PROJECT_ID
+    value: "video-generator-39001"
+    availability:
+      - BUILD
+      - RUNTIME
+  - variable: SERVICE_ACCOUNT_CLIENT_EMAIL
+    value: "firebase-adminsdk-fbsvc@video-generator-39001.iam.gserviceaccount.com"
+    availability:
+      - BUILD
+      - RUNTIME
+  - variable: SERVICE_ACCOUNT_STORAGE_BUCKET
+    value: "video-generator-39001.firebasestorage.app"
+    availability:
+      - BUILD
+      - RUNTIME
+  - variable: NEXT_PUBLIC_FIREBASE_API_KEY
+    value: "AIzaSyD-7SRKbKA0cZ2rJHE-Q9rDBkEf8tnHlq4"
+    availability:
+      - BUILD
+      - RUNTIME
+  - variable: NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN
+    value: "video-generator-39001.firebaseapp.com"
+    availability:
+      - BUILD
+      - RUNTIME
+  - variable: NEXT_PUBLIC_FIREBASE_PROJECT_ID
+    value: "video-generator-39001"
+    availability:
+      - BUILD
+      - RUNTIME
+  - variable: NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET
+    value: "video-generator-39001.firebasestorage.app"
+    availability:
+      - BUILD
+      - RUNTIME
+  - variable: NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID
+    value: "286724416210"
+    availability:
+      - BUILD
+      - RUNTIME
+  - variable: NEXT_PUBLIC_FIREBASE_APP_ID
+    value: "1:286724416210:web:a780bf9b06a5eb2d75c30b"
+    availability:
+      - BUILD
+      - RUNTIME

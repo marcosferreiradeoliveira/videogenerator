@@ -1,0 +1,48 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function validApiKeysPayload() {
+      return request.resource.data.keys().hasOnly([
+        'gemini',
+        'openai',
+        'elevenlabs',
+        'elevenlabsVoiceId',
+        'heygen',
+        'heygenCharacterId',
+        'heygenCharacterKind',
+        'kling'
+      ]) &&
+      (!('gemini' in request.resource.data) || request.resource.data.gemini is string) &&
+      (!('openai' in request.resource.data) || request.resource.data.openai is string) &&
+      (!('elevenlabs' in request.resource.data) || request.resource.data.elevenlabs is string) &&
+      (!('elevenlabsVoiceId' in request.resource.data) || request.resource.data.elevenlabsVoiceId is string) &&
+      (!('heygen' in request.resource.data) || request.resource.data.heygen is string) &&
+      (!('heygenCharacterId' in request.resource.data) || request.resource.data.heygenCharacterId is string) &&
+      (!('heygenCharacterKind' in request.resource.data) || request.resource.data.heygenCharacterKind is string) &&
+      (!('kling' in request.resource.data) || request.resource.data.kling is string);
+    }
+
+    match /users/{userId}/settings/apiKeys {
+      allow read: if isOwner(userId);
+      allow create, update: if isOwner(userId) && validApiKeysPayload();
+      allow delete: if false;
+    }
+
+    match /users/{userId}/projects/{projectId} {
+      allow read, create, update: if isOwner(userId);
+      allow delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "name": "AI Video News Generator",
+  "description": "Automated workflow for generating avatar-based news videos from text, integrating ElevenLabs, HeyGen, and Kling.",
+  "requestFramePermissions": []
+}
