@@ -2,8 +2,10 @@ import { NextResponse } from 'next/server';
 import { adminAuth, adminDb, isAdminConfigured } from '@/lib/firebase-admin';
 import {
   heygenCreateAvatarVideo,
+  heygenListAvatars,
   heygenUploadAudioAsset,
   type HeyGenBackgroundInput,
+  type HeyGenTalkingPhotoInput,
 } from '@/lib/heygen';
 import { sanitizeApiKeysDoc } from '@/lib/sanitize-api-keys';
 import type { HeyGenCharacterKind } from '@/types';
@@ -20,9 +22,67 @@ type GenerateVideoPayload = {
 
 function buildHeygenTitle(projectId: string, notes?: string): string {
   const shortId = projectId.slice(0, 8);
-  if (!notes?.trim()) return `NewsGen — ${shortId}`;
-  const combined = `NewsGen — ${shortId} · ${notes.trim()}`;
+  const human = stripTechnicalDirectives(notes);
+  if (!human) return `NewsGen — ${shortId}`;
+  const combined = `NewsGen — ${shortId} · ${human}`;
   return combined.length > 200 ? `${combined.slice(0, 197)}...` : combined;
+}
+
+/** Partes separadas por vírgula, ponto e vírgula ou quebra de linha (formato do campo de notas). */
+function splitNoteSegments(raw: string): string[] {
+  return raw
+    .split(/[\n,;]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/** Remove diretivas técnicas (fundo HeyGen, motion etc.) para usar só contexto livre no título. */
+function stripTechnicalDirectives(notes?: string): string | undefined {
+  const s = notes?.trim();
+  if (!s) return undefined;
+  let t = s;
+  t = t.replace(
+    /(?:^|[\s,;])(?:bg_color|bg_image|bg_video|background_color|background_image|background_video)\s*:\s*[^\s,;]+/gi,
+    ' '
+  );
+  t = t.replace(
+    /(?:^|[\s,;])(?:talking_style|tp_talking_style|avatar_iv|use_avatar_iv|motion_prompt|avatar_prompt|keep_original_prompt|tp_expression|expression|super_resolution)\s*:\s*[^\n,;]+/gi,
+    ' '
+  );
+  t = t.replace(/[\s,;]{2,}/g, ' ').trim();
+  return t || undefined;
+}
+
+/** Última diretiva de fundo no texto (ordem da esquerda para a direita). */
+function lastBackgroundInText(s: string): HeyGenBackgroundInput | undefined {
+  type Hit = { index: number; bg: HeyGenBackgroundInput };
+  const hits: Hit[] = [];
+
+  const pushAll = (re: RegExp, map: (m: RegExpMatchArray) => HeyGenBackgroundInput) => {
+    const r = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+    let m: RegExpExecArray | null;
+    while ((m = r.exec(s)) !== null) {
+      hits.push({ index: m.index, bg: map(m) });
+    }
+  };
+
+  pushAll(/(?:^|[\s,;])(?:bg_video|background_video)\s*:\s*(https?:\/\/[^\s,;]+)/gi, (m) => ({
+    type: 'video' as const,
+    url: m[1],
+    playStyle: 'loop' as const,
+  }));
+  pushAll(/(?:^|[\s,;])(?:bg_image|background_image)\s*:\s*(https?:\/\/[^\s,;]+)/gi, (m) => ({
+    type: 'image' as const,
+    url: m[1],
+  }));
+  pushAll(/(?:^|[\s,;])(?:bg_color|background_color)\s*:\s*(#[0-9a-fA-F]{3,8})\b/gi, (m) => ({
+    type: 'color' as const,
+    value: m[1],
+  }));
+
+  if (hits.length === 0) return undefined;
+  hits.sort((a, b) => a.index - b.index);
+  return hits[hits.length - 1].bg;
 }
 
 async function downloadAudio(url: string): Promise<{ buffer: Buffer; contentType: string }> {
@@ -53,40 +113,108 @@ function resolveCharacter(apiKeys: ReturnType<typeof sanitizeApiKeysDoc>): {
   return { id, kind };
 }
 
+async function normalizeCharacterKind(
+  apiKey: string,
+  character: { id: string; kind: HeyGenCharacterKind }
+): Promise<{ id: string; kind: HeyGenCharacterKind }> {
+  if (!character.id) return character;
+
+  // Prevent common mismatch: avatar_id saved with talking_photo kind.
+  if (character.kind === 'talking_photo') {
+    try {
+      const { avatars } = await heygenListAvatars(apiKey);
+      const isAvatarId = avatars.some((a) => a.avatar_id === character.id);
+      if (isAvatarId) {
+        return { ...character, kind: 'avatar' };
+      }
+    } catch {
+      // If list call fails, keep original behavior and let create endpoint return details.
+    }
+  }
+
+  return character;
+}
+
 function parseBackgroundFromNotes(videoNotes?: string): HeyGenBackgroundInput | undefined {
   const raw = videoNotes?.trim();
   if (!raw) return undefined;
 
-  // Supported examples:
-  // bg_color:#0f172a
-  // bg_image:https://site.com/studio.jpg
-  // bg_video:https://site.com/loop.mp4
-  // https://site.com/studio.jpg
-  // #0f172a
-  const colorDirective = raw.match(
-    /(?:^|\s)(?:bg_color|background_color)\s*:\s*(#[0-9a-fA-F]{3,8})(?=\s|$)/i
-  )?.[1];
-  if (colorDirective) return { type: 'color', value: colorDirective };
+  // Vírgula, ponto e vírgula ou linha separam diretivas; dentro de um bloco vale a última diretiva de fundo.
+  // Ex.: bg_color:#0f172a,bg_image:https://... → usa a imagem (última).
+  let last: HeyGenBackgroundInput | undefined;
+  for (const part of splitNoteSegments(raw)) {
+    const found = lastBackgroundInText(part);
+    if (found) last = found;
+  }
+  if (last) return last;
 
-  const imageDirective = raw.match(
-    /(?:^|\s)(?:bg_image|background_image)\s*:\s*(https?:\/\/\S+)(?=\s|$)/i
-  )?.[1];
-  if (imageDirective) return { type: 'image', url: imageDirective };
-
-  const videoDirective = raw.match(
-    /(?:^|\s)(?:bg_video|background_video)\s*:\s*(https?:\/\/\S+)(?=\s|$)/i
-  )?.[1];
-  if (videoDirective) return { type: 'video', url: videoDirective, playStyle: 'loop' };
-
-  if (/^#[0-9a-fA-F]{3,8}$/.test(raw)) return { type: 'color', value: raw };
-  if (/^https?:\/\/\S+$/i.test(raw)) {
-    const lower = raw.toLowerCase();
-    if (/\.(mp4|webm|mov)(\?.*)?$/.test(lower)) return { type: 'video', url: raw, playStyle: 'loop' };
-    return { type: 'image', url: raw };
+  const t = raw.trim();
+  if (/^#[0-9a-fA-F]{3,8}$/.test(t)) return { type: 'color', value: t };
+  if (/^https?:\/\/\S+$/i.test(t)) {
+    const lower = t.toLowerCase();
+    if (/\.(mp4|webm|mov)(\?.*)?$/.test(lower)) return { type: 'video', url: t, playStyle: 'loop' };
+    return { type: 'image', url: t };
   }
 
-  // Free text is preserved as notes/title context but does not map 1:1 to an official HeyGen prompt field.
   return undefined;
+}
+
+function parseBooleanDirective(value: string): boolean | undefined {
+  const v = value.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on', 'sim'].includes(v)) return true;
+  if (['0', 'false', 'no', 'off', 'nao', 'não'].includes(v)) return false;
+  return undefined;
+}
+
+function applyTalkingPhotoToken(cfg: HeyGenTalkingPhotoInput, key: string, value: string) {
+  const k = key.toLowerCase();
+  const v = value.trim();
+
+  if (k === 'talking_style' || k === 'tp_talking_style') {
+    if (v === 'stable' || v === 'expressive') cfg.talkingStyle = v;
+    return;
+  }
+  if (k === 'avatar_iv' || k === 'use_avatar_iv') {
+    const b = parseBooleanDirective(v);
+    if (typeof b === 'boolean') cfg.useAvatarIVModel = b;
+    return;
+  }
+  if (k === 'motion_prompt' || k === 'avatar_prompt') {
+    if (v) cfg.motionPrompt = v;
+    return;
+  }
+  if (k === 'keep_original_prompt') {
+    const b = parseBooleanDirective(v);
+    if (typeof b === 'boolean') cfg.keepOriginalPrompt = b;
+    return;
+  }
+  if (k === 'tp_expression' || k === 'expression') {
+    if (v === 'default' || v === 'happy') cfg.expression = v;
+    return;
+  }
+  if (k === 'super_resolution') {
+    const b = parseBooleanDirective(v);
+    if (typeof b === 'boolean') cfg.superResolution = b;
+  }
+}
+
+function parseTalkingPhotoFromNotes(videoNotes?: string): HeyGenTalkingPhotoInput | undefined {
+  const raw = videoNotes?.trim();
+  if (!raw) return undefined;
+
+  const cfg: HeyGenTalkingPhotoInput = {};
+  const tokenRe =
+    /(?:^|[\s,;])(talking_style|tp_talking_style|avatar_iv|use_avatar_iv|motion_prompt|avatar_prompt|keep_original_prompt|tp_expression|expression|super_resolution)\s*:\s*([^\n,;]+)/gi;
+
+  for (const part of splitNoteSegments(raw)) {
+    let m: RegExpExecArray | null;
+    const r = new RegExp(tokenRe.source, tokenRe.flags);
+    while ((m = r.exec(part)) !== null) {
+      applyTalkingPhotoToken(cfg, m[1], m[2]);
+    }
+  }
+
+  return Object.keys(cfg).length > 0 ? cfg : undefined;
 }
 
 export async function POST(request: Request) {
@@ -117,7 +245,10 @@ export async function POST(request: Request) {
       );
     }
 
-    const { id: characterId, kind: characterKind } = resolveCharacter(apiKeys);
+    const resolvedCharacter = resolveCharacter(apiKeys);
+    const heygenKey = apiKeys.heygen.trim();
+    const normalizedCharacter = await normalizeCharacterKind(heygenKey, resolvedCharacter);
+    const { id: characterId, kind: characterKind } = normalizedCharacter;
     if (!characterId) {
       return NextResponse.json(
         {
@@ -146,9 +277,17 @@ export async function POST(request: Request) {
     const audioTokens = Number(prevCost.audioTokens ?? script.length);
     const audioCost = Number(prevCost.audioCost ?? body.currentAudioCost ?? 0);
 
-    const heygenKey = apiKeys.heygen.trim();
     const heygenTitle = buildHeygenTitle(projectId, videoNotes);
     const heygenBackground = parseBackgroundFromNotes(videoNotes);
+    const notesTalkingPhoto = parseTalkingPhotoFromNotes(videoNotes);
+    const heygenTalkingPhoto: HeyGenTalkingPhotoInput | undefined =
+      characterKind === 'talking_photo'
+        ? {
+            talkingStyle: 'expressive',
+            useAvatarIVModel: true,
+            ...(notesTalkingPhoto || {}),
+          }
+        : undefined;
     let videoId: string;
 
     try {
@@ -158,6 +297,7 @@ export async function POST(request: Request) {
         audioUrl,
         title: heygenTitle,
         background: heygenBackground,
+        talkingPhoto: heygenTalkingPhoto,
       });
     } catch (firstErr) {
       try {
@@ -172,6 +312,7 @@ export async function POST(request: Request) {
           audioUrl: heygenAudioUrl,
           title: heygenTitle,
           background: heygenBackground,
+          talkingPhoto: heygenTalkingPhoto,
         });
       } catch (rehostErr) {
         const r = rehostErr instanceof Error ? rehostErr.message : String(rehostErr);

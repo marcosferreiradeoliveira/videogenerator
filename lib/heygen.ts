@@ -7,6 +7,15 @@ export type HeyGenBackgroundInput =
   | { type: 'image'; url: string }
   | { type: 'video'; url: string; playStyle?: 'fit_to_scene' | 'freeze' | 'loop' | 'full_video' };
 
+export type HeyGenTalkingPhotoInput = {
+  talkingStyle?: 'stable' | 'expressive';
+  useAvatarIVModel?: boolean;
+  motionPrompt?: string;
+  keepOriginalPrompt?: boolean;
+  expression?: 'default' | 'happy';
+  superResolution?: boolean;
+};
+
 function pickHeyGenError(json: { error?: string | HeyGenErr | null; message?: string }): string | null {
   const e = json.error;
   if (!e) return null;
@@ -22,11 +31,34 @@ export async function heygenCreateAvatarVideo(
     audioUrl: string;
     title?: string;
     background?: HeyGenBackgroundInput;
+    talkingPhoto?: HeyGenTalkingPhotoInput;
   }
 ): Promise<string> {
+  const inferredAvatarIV =
+    typeof params.talkingPhoto?.useAvatarIVModel === 'boolean'
+      ? params.talkingPhoto.useAvatarIVModel
+      : params.talkingPhoto?.motionPrompt
+        ? true
+        : undefined;
   const character =
     params.characterKind === 'talking_photo'
-      ? { type: 'talking_photo' as const, talking_photo_id: params.characterId, scale: 1 }
+      ? {
+          type: 'talking_photo' as const,
+          talking_photo_id: params.characterId,
+          scale: 1,
+          ...(params.talkingPhoto?.talkingStyle
+            ? { talking_style: params.talkingPhoto.talkingStyle }
+            : {}),
+          ...(typeof inferredAvatarIV === 'boolean' ? { use_avatar_iv_model: inferredAvatarIV } : {}),
+          ...(params.talkingPhoto?.motionPrompt ? { prompt: params.talkingPhoto.motionPrompt } : {}),
+          ...(typeof params.talkingPhoto?.keepOriginalPrompt === 'boolean'
+            ? { keep_original_prompt: params.talkingPhoto.keepOriginalPrompt }
+            : {}),
+          ...(params.talkingPhoto?.expression ? { expression: params.talkingPhoto.expression } : {}),
+          ...(typeof params.talkingPhoto?.superResolution === 'boolean'
+            ? { super_resolution: params.talkingPhoto.superResolution }
+            : {}),
+        }
       : { type: 'avatar' as const, avatar_id: params.characterId, scale: 1 };
 
   const body = {

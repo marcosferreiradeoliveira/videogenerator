@@ -24,7 +24,7 @@ import {
   X,
   Library
 } from 'lucide-react';
-import { ApiKeys, GenerationCost, HeyGenCharacterKind, VideoProject } from '@/types';
+import { ApiKeys, GenerationCost, VideoProject } from '@/types';
 import { GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signOut, type User } from 'firebase/auth';
 import { collection, doc, getDoc, getDocs, orderBy, query, setDoc } from 'firebase/firestore';
 import { firebaseAuth, firebaseDb, isFirebaseConfigured } from '@/lib/firebase';
@@ -40,22 +40,21 @@ const INITIAL_KEYS: ApiKeys = {
   openai: '',
 };
 
+const VIDEO_DURATION_PRESETS: { value: number; label: string }[] = [
+  { value: 30, label: '30 segundos' },
+  { value: 45, label: '45 segundos' },
+  { value: 60, label: '1 minuto' },
+  { value: 90, label: '1 minuto e 30 segundos' },
+  { value: 120, label: '2 minutos' },
+  { value: 180, label: '3 minutos' },
+];
+
 const isProdBuild = process.env.NODE_ENV === 'production';
 
 function dedupeByAvatarId(items: { avatar_id: string; avatar_name: string }[]) {
   const seen = new Set<string>();
   return items.filter((a) => {
     const id = a.avatar_id?.trim();
-    if (!id || seen.has(id)) return false;
-    seen.add(id);
-    return true;
-  });
-}
-
-function dedupeByTalkingPhotoId(items: { talking_photo_id: string; talking_photo_name: string }[]) {
-  const seen = new Set<string>();
-  return items.filter((p) => {
-    const id = p.talking_photo_id?.trim();
     if (!id || seen.has(id)) return false;
     seen.add(id);
     return true;
@@ -117,16 +116,16 @@ const KEY_HELP_CONTENT: Record<keyof ApiKeys, { title: string; steps: string[]; 
     title: 'HeyGen — ID do personagem',
     steps: [
       'Em Configurações, clique em "Carregar personagens HeyGen" (com a API key preenchida).',
-      'Escolha um avatar na lista ou cole manualmente um avatar_id / talking_photo_id da API List Avatars V2.',
-      'O tipo (Avatar ou Talking photo) deve corresponder ao ID.',
+      'Escolha um avatar na lista ou cole manualmente um avatar_id da API List Avatars V2.',
+      'Use apenas Avatar (nao Talking Photo) para melhor resultado neste app.',
     ],
     link: 'https://docs.heygen.com/reference/list-avatars-v2',
   },
   heygenCharacterKind: {
     title: 'Tipo de personagem HeyGen',
     steps: [
-      'Avatar: personagens em vídeo da biblioteca HeyGen (use avatar_id).',
-      'Talking photo: foto que fala, tipo Photo Avatar (use talking_photo_id).',
+      'Este app esta configurado para usar apenas Avatar.',
+      'Se estava em Talking Photo, altere para Avatar e use um avatar_id.',
     ],
     link: 'https://docs.heygen.com/docs/create-videos-with-avatars',
   },
@@ -156,14 +155,12 @@ export default function Home() {
   const [elevenLabsVoicesError, setElevenLabsVoicesError] = useState<string | null>(null);
   const [elevenLabsMissingVoicesRead, setElevenLabsMissingVoicesRead] = useState(false);
   const [heygenAvatars, setHeygenAvatars] = useState<{ avatar_id: string; avatar_name: string }[]>([]);
-  const [heygenTalkingPhotos, setHeygenTalkingPhotos] = useState<
-    { talking_photo_id: string; talking_photo_name: string }[]
-  >([]);
   const [heygenListLoading, setHeygenListLoading] = useState(false);
   const [heygenListError, setHeygenListError] = useState<string | null>(null);
 
   // Generator State
   const [rawMaterial, setRawMaterial] = useState('');
+  const [targetVideoDurationSeconds, setTargetVideoDurationSeconds] = useState(60);
   const [editableScript, setEditableScript] = useState('');
   /** Instruções extras para o vídeo (HeyGen), preenchidas na revisão de áudio. */
   const [videoPromptInfo, setVideoPromptInfo] = useState('');
@@ -406,6 +403,7 @@ export default function Home() {
       id: Math.random().toString(36).substring(7),
       date: new Date().toISOString(),
       rawMaterial,
+      targetVideoDurationSeconds,
       status: 'generating_script',
     };
     setProject(newProject);
@@ -424,6 +422,7 @@ export default function Home() {
           projectId: newProject.id,
           rawMaterial,
           promptInfo: '',
+          targetVideoDurationSeconds,
           idToken,
         }),
       });
@@ -767,11 +766,9 @@ export default function Home() {
         throw new Error(data?.error || 'Falha ao listar personagens.');
       }
       setHeygenAvatars(dedupeByAvatarId(data.avatars || []));
-      setHeygenTalkingPhotos(dedupeByTalkingPhotoId(data.talking_photos || []));
     } catch (e) {
       setHeygenListError(e instanceof Error ? e.message : 'Erro ao carregar HeyGen.');
       setHeygenAvatars([]);
-      setHeygenTalkingPhotos([]);
     } finally {
       setHeygenListLoading(false);
     }
@@ -781,11 +778,9 @@ export default function Home() {
     if (!value) return;
     const colon = value.indexOf(':');
     if (colon < 1) return;
-    const tag = value.slice(0, colon);
     const cid = value.slice(colon + 1);
-    const kind: HeyGenCharacterKind = tag === 'tp' ? 'talking_photo' : 'avatar';
     setApiKeys((prev) => {
-      const next = { ...prev, heygenCharacterKind: kind, heygenCharacterId: cid };
+      const next: ApiKeys = { ...prev, heygenCharacterKind: 'avatar', heygenCharacterId: cid };
       if (firebaseDb && user) {
         void setDoc(doc(firebaseDb, 'users', user.uid, 'settings', 'apiKeys'), next).catch((err) => {
           console.error(err);
@@ -797,9 +792,7 @@ export default function Home() {
   };
 
   const heygenPickSelectValue =
-    apiKeys.heygenCharacterId.trim() !== ''
-      ? `${apiKeys.heygenCharacterKind === 'talking_photo' ? 'tp' : 'avatar'}:${apiKeys.heygenCharacterId}`
-      : '';
+    apiKeys.heygenCharacterId.trim() !== '' ? `avatar:${apiKeys.heygenCharacterId}` : '';
 
   const handleReset = () => {
     setCurrentStep('idle');
@@ -1096,10 +1089,29 @@ export default function Home() {
                           <textarea
                             value={rawMaterial}
                             onChange={(e) => setRawMaterial(e.target.value)}
-                            placeholder="Cole aqui os dados, fatos ou a reportagem bruta. A IA irá transformar isso em um roteiro de 1 minuto..."
+                            placeholder="Cole aqui os dados, fatos ou a reportagem bruta. A IA transforma o material num roteiro proporcional à duração escolhida abaixo."
                             className="w-full h-40 px-4 py-3 rounded-xl border border-neutral-300 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-shadow resize-none text-sm"
                             disabled={isGenerating}
                           />
+                        </div>
+
+                        <div className="space-y-2">
+                          <label className="text-sm font-medium text-neutral-700">Duração prevista do vídeo</label>
+                          <select
+                            value={targetVideoDurationSeconds}
+                            onChange={(e) => setTargetVideoDurationSeconds(Number(e.target.value))}
+                            disabled={isGenerating}
+                            className="w-full px-4 py-3 rounded-xl border border-neutral-300 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-shadow text-sm bg-white"
+                          >
+                            {VIDEO_DURATION_PRESETS.map((opt) => (
+                              <option key={opt.value} value={opt.value}>
+                                {opt.label}
+                              </option>
+                            ))}
+                          </select>
+                          <p className="text-xs text-neutral-500">
+                            O roteiro será gerado com extensão compatível com essa duração de narração (ritmo de telejornal).
+                          </p>
                         </div>
 
                         <button
@@ -1342,11 +1354,13 @@ export default function Home() {
                             Informações adicionais para o vídeo (opcional)
                           </label>
                           <p className="text-xs text-neutral-500">
-                            Contexto opcional do vídeo. Também aceitamos comandos para fundo:
+                            Contexto livre (aparece no título do vídeo no HeyGen). Comandos de fundo podem ir na mesma
+                            caixa, separados por vírgula, ponto e vírgula ou linha — se houver vários, vale o último
+                            fundo indicado:{' '}
                             <code className="mx-1 text-neutral-700">bg_color:#0f172a</code>,
-                            <code className="mx-1 text-neutral-700">bg_image:https://...</code> ou
-                            <code className="mx-1 text-neutral-700">bg_video:https://...</code>.
-                            O personagem continua a ser o definido em Configurações.
+                            <code className="mx-1 text-neutral-700">bg_image:https://...</code> ou{' '}
+                            <code className="mx-1 text-neutral-700">bg_video:https://...</code>. O personagem é o das
+                            Configurações.
                           </p>
                           <textarea
                             value={videoPromptInfo}
@@ -1740,11 +1754,11 @@ export default function Home() {
                       <select
                         value={heygenPickSelectValue}
                         onChange={(e) => applyHeygenCharacterPick(e.target.value)}
-                        disabled={isKeysLoading || (heygenAvatars.length === 0 && heygenTalkingPhotos.length === 0)}
+                        disabled={isKeysLoading || heygenAvatars.length === 0}
                         className="w-full px-4 py-3 rounded-xl border border-neutral-300 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-shadow text-sm bg-white"
                       >
                         <option value="">
-                          {heygenAvatars.length === 0 && heygenTalkingPhotos.length === 0
+                          {heygenAvatars.length === 0
                             ? 'Carregue a lista ou defina o ID abaixo'
                             : 'Escolher na lista…'}
                         </option>
@@ -1757,39 +1771,10 @@ export default function Home() {
                             ))}
                           </optgroup>
                         ) : null}
-                        {heygenTalkingPhotos.length > 0 ? (
-                          <optgroup label="Talking photos">
-                            {heygenTalkingPhotos.map((p) => (
-                              <option key={`heygen-tp-${p.talking_photo_id}`} value={`tp:${p.talking_photo_id}`}>
-                                {p.talking_photo_name}
-                              </option>
-                            ))}
-                          </optgroup>
-                        ) : null}
                       </select>
                       {heygenListError ? (
                         <p className="text-xs text-red-700">{heygenListError}</p>
                       ) : null}
-                      <div className="flex items-center justify-between">
-                        <label className="text-sm font-medium text-neutral-700">Tipo</label>
-                        <button
-                          type="button"
-                          onClick={() => setHelpModalKey('heygenCharacterKind')}
-                          className="text-xs text-indigo-600 hover:text-indigo-700 inline-flex items-center gap-1"
-                        >
-                          <HelpCircle className="w-3.5 h-3.5" />
-                          Ajuda
-                        </button>
-                      </div>
-                      <select
-                        value={apiKeys.heygenCharacterKind}
-                        onChange={(e) => updateApiKey('heygenCharacterKind', e.target.value as HeyGenCharacterKind)}
-                        disabled={isKeysLoading}
-                        className="w-full px-4 py-3 rounded-xl border border-neutral-300 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-shadow text-sm bg-white"
-                      >
-                        <option value="avatar">Avatar (avatar_id)</option>
-                        <option value="talking_photo">Talking photo (talking_photo_id)</option>
-                      </select>
                       <div className="flex items-center justify-between">
                         <label className="text-sm font-medium text-neutral-700">ID do personagem</label>
                         <button
@@ -1807,7 +1792,7 @@ export default function Home() {
                           type="text"
                           value={apiKeys.heygenCharacterId}
                           onChange={(e) => updateApiKey('heygenCharacterId', e.target.value)}
-                          placeholder="avatar_id ou talking_photo_id"
+                          placeholder="avatar_id"
                           className="w-full pl-10 pr-4 py-3 rounded-xl border border-neutral-300 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-shadow text-sm"
                           disabled={isKeysLoading}
                         />
@@ -1918,6 +1903,13 @@ export default function Home() {
                           <div className="text-sm text-neutral-700 bg-neutral-50 p-3 rounded-lg whitespace-pre-wrap">
                             {item.rawMaterial}
                           </div>
+                          {typeof item.targetVideoDurationSeconds === 'number' && item.targetVideoDurationSeconds > 0 ? (
+                            <p className="text-xs text-neutral-600">
+                              Duração prevista:{' '}
+                              {VIDEO_DURATION_PRESETS.find((o) => o.value === item.targetVideoDurationSeconds)?.label ??
+                                `${item.targetVideoDurationSeconds} s`}
+                            </p>
+                          ) : null}
                         </div>
 
                         {item.promptInfo && (

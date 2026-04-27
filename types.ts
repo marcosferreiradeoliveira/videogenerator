@@ -24,6 +24,8 @@ export interface VideoProject {
   id: string;
   date: string;
   rawMaterial: string;
+  /** Duração alvo do vídeo em segundos; usada para dimensionar o roteiro. */
+  targetVideoDurationSeconds?: number;
   generatedScript?: string;
   /** Notas opcionais para o vídeo (HeyGen), preenchidas na revisão de áudio. */
   promptInfo?: string;
