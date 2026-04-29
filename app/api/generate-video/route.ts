@@ -327,7 +327,7 @@ export async function POST(request: Request) {
         status: 'generating_video',
         heygenVideoId: videoId,
         videoIsDemo: false,
-        promptInfo: videoNotes || undefined,
+        ...(videoNotes?.trim() ? { promptInfo: videoNotes.trim() } : {}),
         updatedAt: new Date().toISOString(),
       },
       { merge: true }

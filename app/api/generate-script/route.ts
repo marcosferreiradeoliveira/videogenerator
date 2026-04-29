@@ -193,7 +193,7 @@ ${promptInfo ? `Instruções Adicionais de Tom/Estilo: ${promptInfo}` : ''}`;
           id: projectId,
           rawMaterial,
           targetVideoDurationSeconds,
-          promptInfo,
+          ...(promptInfo ? { promptInfo } : {}),
           generatedScript,
           status: 'script_review',
           updatedAt: new Date().toISOString(),

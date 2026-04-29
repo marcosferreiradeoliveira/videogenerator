@@ -643,9 +643,10 @@ export default function Home() {
 
     setIsGenerating(true);
     setCurrentStep('generating_video');
+    const videoNotesTrim = videoPromptInfo.trim();
     const baseProject: VideoProject = {
       ...project,
-      promptInfo: videoPromptInfo.trim() || undefined,
+      ...(videoNotesTrim ? { promptInfo: videoNotesTrim } : {}),
     };
     const generatingVideoProject: VideoProject = { ...baseProject, status: 'generating_video' };
     setProject(generatingVideoProject);
@@ -674,7 +675,7 @@ export default function Home() {
           projectId: baseProject.id,
           script: editableScript,
           currentAudioCost: baseProject.cost?.audioCost || 0,
-          videoNotes: videoPromptInfo.trim(),
+          videoNotes: videoNotesTrim,
           idToken,
         }),
       });
@@ -800,10 +801,6 @@ export default function Home() {
     setEditableScript('');
     setVideoPromptInfo('');
   };
-
-  const canGoToScript = Boolean(editableScript || project?.generatedScript);
-  const canGoToAudio = Boolean(project?.audioUrl);
-  const canGoToVideo = Boolean(project?.videoUrl);
 
   const elevenLabsVoiceSelectValue = (() => {
     if (elevenLabsVoices.some((v) => v.voice_id === apiKeys.elevenlabsVoiceId)) {
@@ -1467,33 +1464,21 @@ export default function Home() {
                           icon={<Sparkles className="w-4 h-4" />} 
                           label="Roteirização (Gemini IA)" 
                           status={currentStep === 'idle' ? 'pending' : currentStep === 'generating_script' ? 'loading' : 'success'}
-                          onClick={
-                            canGoToScript
-                              ? () => setCurrentStep('script_review')
-                              : undefined
-                          }
+                          onClick={isGenerating ? undefined : () => setCurrentStep('script_review')}
                         />
                         <div className="w-0.5 h-4 bg-neutral-200 ml-4"></div>
                         <StatusItem 
                           icon={<Mic className="w-4 h-4" />} 
                           label="Geração de Áudio (ElevenLabs)" 
                           status={['idle', 'generating_script', 'script_review'].includes(currentStep) ? 'pending' : currentStep === 'generating_audio' ? 'loading' : currentStep === 'error' && !project?.audioUrl ? 'pending' : currentStep === 'error' && project?.status === 'generating_audio' ? 'error' : 'success'}
-                          onClick={
-                            canGoToAudio
-                              ? () => setCurrentStep('audio_review')
-                              : undefined
-                          }
+                          onClick={isGenerating ? undefined : () => setCurrentStep('audio_review')}
                         />
                         <div className="w-0.5 h-4 bg-neutral-200 ml-4"></div>
                         <StatusItem 
                           icon={<Video className="w-4 h-4" />} 
                           label="Vídeo (HeyGen)" 
                           status={['idle', 'generating_script', 'script_review', 'generating_audio', 'audio_review'].includes(currentStep) ? 'pending' : currentStep === 'generating_video' ? 'loading' : currentStep === 'completed' ? 'success' : 'error'}
-                          onClick={
-                            canGoToVideo
-                              ? () => setCurrentStep('completed')
-                              : undefined
-                          }
+                          onClick={isGenerating ? undefined : () => setCurrentStep('completed')}
                         />
                       </div>
                     </div>

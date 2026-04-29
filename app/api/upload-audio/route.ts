@@ -116,7 +116,7 @@ export async function POST(request: Request) {
     await adminDb.collection('users').doc(uid).collection('projects').doc(projectId).set(
       {
         id: projectId,
-        generatedScript: script || undefined,
+        ...(script.trim() ? { generatedScript: script } : {}),
         status: 'audio_review',
         audioUrl,
         cost,
