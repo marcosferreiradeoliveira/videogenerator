@@ -1464,21 +1464,21 @@ export default function Home() {
                           icon={<Sparkles className="w-4 h-4" />} 
                           label="Roteirização (Gemini IA)" 
                           status={currentStep === 'idle' ? 'pending' : currentStep === 'generating_script' ? 'loading' : 'success'}
-                          onClick={isGenerating ? undefined : () => setCurrentStep('script_review')}
+                          onClick={() => setCurrentStep('script_review')}
                         />
                         <div className="w-0.5 h-4 bg-neutral-200 ml-4"></div>
                         <StatusItem 
                           icon={<Mic className="w-4 h-4" />} 
                           label="Geração de Áudio (ElevenLabs)" 
                           status={['idle', 'generating_script', 'script_review'].includes(currentStep) ? 'pending' : currentStep === 'generating_audio' ? 'loading' : currentStep === 'error' && !project?.audioUrl ? 'pending' : currentStep === 'error' && project?.status === 'generating_audio' ? 'error' : 'success'}
-                          onClick={isGenerating ? undefined : () => setCurrentStep('audio_review')}
+                          onClick={() => setCurrentStep('audio_review')}
                         />
                         <div className="w-0.5 h-4 bg-neutral-200 ml-4"></div>
                         <StatusItem 
                           icon={<Video className="w-4 h-4" />} 
                           label="Vídeo (HeyGen)" 
                           status={['idle', 'generating_script', 'script_review', 'generating_audio', 'audio_review'].includes(currentStep) ? 'pending' : currentStep === 'generating_video' ? 'loading' : currentStep === 'completed' ? 'success' : 'error'}
-                          onClick={isGenerating ? undefined : () => setCurrentStep('completed')}
+                          onClick={() => setCurrentStep('completed')}
                         />
                       </div>
                     </div>
