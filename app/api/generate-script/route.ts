@@ -183,6 +183,7 @@ ${promptInfo ? `Instruções Adicionais de Tom/Estilo: ${promptInfo}` : ''}`;
       return NextResponse.json({ error: 'Resposta vazia do provedor de IA.' }, { status: 502 });
     }
 
+    const now = new Date().toISOString();
     await adminDb
       .collection('users')
       .doc(uid)
@@ -191,12 +192,13 @@ ${promptInfo ? `Instruções Adicionais de Tom/Estilo: ${promptInfo}` : ''}`;
       .set(
         {
           id: projectId,
+          date: now,
           rawMaterial,
           targetVideoDurationSeconds,
           ...(promptInfo ? { promptInfo } : {}),
           generatedScript,
           status: 'script_review',
-          updatedAt: new Date().toISOString(),
+          updatedAt: now,
         },
         { merge: true }
       );

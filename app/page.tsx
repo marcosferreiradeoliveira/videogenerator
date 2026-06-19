@@ -333,6 +333,89 @@ export default function Home() {
     }
   };
 
+  /** Garante um projeto ativo quando o roteiro existe mas o estado `project` foi perdido (ex.: navegação na barra lateral). */
+  const resolveActiveProject = async (): Promise<VideoProject | null> => {
+    if (project?.id) {
+      const synced: VideoProject = {
+        ...project,
+        generatedScript: editableScript.trim() || project.generatedScript,
+      };
+      if (synced.generatedScript !== project.generatedScript) {
+        setProject(synced);
+      }
+      return synced;
+    }
+
+    if (!editableScript.trim()) return null;
+
+    const scriptTrim = editableScript.trim();
+    const fromSaved =
+      savedProjects.find((p) => p.generatedScript?.trim() === scriptTrim) ??
+      savedProjects.find((p) => p.status === 'script_review') ??
+      savedProjects[0];
+
+    if (fromSaved?.id) {
+      const restored: VideoProject = {
+        ...fromSaved,
+        generatedScript: editableScript,
+        status: 'script_review',
+      };
+      setProject(restored);
+      return restored;
+    }
+
+    const created: VideoProject = {
+      id: Math.random().toString(36).substring(7),
+      date: new Date().toISOString(),
+      rawMaterial: rawMaterial.trim() || '(roteiro sem material bruto)',
+      targetVideoDurationSeconds,
+      generatedScript: editableScript,
+      status: 'script_review',
+    };
+    setProject(created);
+    await persistProject(created);
+    return created;
+  };
+
+  const navigateWorkflowStep = (step: VideoProject['status']) => {
+    if (step === 'script_review' && !project?.id) {
+      const scriptTrim = editableScript.trim();
+      const fromSaved =
+        savedProjects.find((p) => p.generatedScript?.trim() === scriptTrim) ??
+        savedProjects.find((p) => p.status === 'script_review') ??
+        savedProjects[0];
+      if (fromSaved?.id) {
+        setProject({
+          ...fromSaved,
+          generatedScript: editableScript || fromSaved.generatedScript || '',
+          status: 'script_review',
+        });
+        if (!editableScript && fromSaved.generatedScript) {
+          setEditableScript(fromSaved.generatedScript);
+        }
+      }
+    }
+    setCurrentStep(step);
+  };
+
+  useEffect(() => {
+    if (!user || !['script_review', 'generating_audio'].includes(currentStep)) return;
+    if (project?.id || !editableScript.trim()) return;
+
+    const scriptTrim = editableScript.trim();
+    const fromSaved =
+      savedProjects.find((p) => p.generatedScript?.trim() === scriptTrim) ??
+      savedProjects.find((p) => p.status === 'script_review');
+
+    if (fromSaved?.id) {
+      setProject({
+        ...fromSaved,
+        generatedScript: editableScript,
+        status: 'script_review',
+      });
+    }
+  }, [user, currentStep, project?.id, editableScript, savedProjects]);
+
   const updateApiKey = async (field: keyof ApiKeys, value: string) => {
     const nextKeys = { ...apiKeys, [field]: value };
     setApiKeys(nextKeys);
@@ -476,7 +559,8 @@ export default function Home() {
       );
       return;
     }
-    if (!project) {
+    const baseProject = await resolveActiveProject();
+    if (!baseProject) {
       alert('Projeto não encontrado. Gere o roteiro novamente.');
       setCurrentStep('idle');
       return;
@@ -484,7 +568,6 @@ export default function Home() {
 
     setIsGenerating(true);
     setCurrentStep('generating_audio');
-    const baseProject = { ...project };
     const generatingAudioProject: VideoProject = {
       ...baseProject,
       status: 'generating_audio',
@@ -546,7 +629,8 @@ export default function Home() {
       alert('Selecione um arquivo de áudio.');
       return;
     }
-    if (!project) {
+    const baseProject = await resolveActiveProject();
+    if (!baseProject) {
       alert('Projeto não encontrado. Gere o roteiro novamente.');
       setCurrentStep('idle');
       return;
@@ -555,7 +639,6 @@ export default function Home() {
     setIsGenerating(true);
     setIsUploadingTestAudio(true);
     setCurrentStep('generating_audio');
-    const baseProject = { ...project };
     const generatingAudioProject: VideoProject = {
       ...baseProject,
       status: 'generating_audio',
@@ -616,17 +699,24 @@ export default function Home() {
   };
 
   const handleGenerateVideo = async () => {
-    if (!project) {
+    const activeProject =
+      (project?.id && project.audioUrl ? project : null) ??
+      savedProjects.find((p) => p.audioUrl && p.cost);
+    if (!activeProject?.id) {
       alert('Projeto não encontrado. Gere o roteiro novamente.');
       setCurrentStep('idle');
       return;
     }
-    if (!project.cost) {
+    if (activeProject !== project) {
+      setProject(activeProject);
+      if (activeProject.generatedScript) setEditableScript(activeProject.generatedScript);
+    }
+    if (!activeProject.cost) {
       alert('Custo de áudio não encontrado. Gere o áudio novamente.');
       setCurrentStep('script_review');
       return;
     }
-    if (!project.audioUrl) {
+    if (!activeProject.audioUrl) {
       alert('É necessário ter áudio no projeto antes de gerar o vídeo.');
       return;
     }
@@ -645,7 +735,7 @@ export default function Home() {
     setCurrentStep('generating_video');
     const videoNotesTrim = videoPromptInfo.trim();
     const baseProject: VideoProject = {
-      ...project,
+      ...activeProject,
       ...(videoNotesTrim ? { promptInfo: videoNotesTrim } : {}),
     };
     const generatingVideoProject: VideoProject = { ...baseProject, status: 'generating_video' };
@@ -1323,7 +1413,7 @@ export default function Home() {
                             Revisão do Áudio
                           </h3>
                           <button 
-                            onClick={() => setCurrentStep('script_review')}
+                            onClick={() => navigateWorkflowStep('script_review')}
                             disabled={isGenerating}
                             className="text-sm text-neutral-500 hover:text-neutral-700 flex items-center gap-1"
                           >
@@ -1464,21 +1554,21 @@ export default function Home() {
                           icon={<Sparkles className="w-4 h-4" />} 
                           label="Roteirização (Gemini IA)" 
                           status={currentStep === 'idle' ? 'pending' : currentStep === 'generating_script' ? 'loading' : 'success'}
-                          onClick={() => setCurrentStep('script_review')}
+                          onClick={() => navigateWorkflowStep('script_review')}
                         />
                         <div className="w-0.5 h-4 bg-neutral-200 ml-4"></div>
                         <StatusItem 
                           icon={<Mic className="w-4 h-4" />} 
                           label="Geração de Áudio (ElevenLabs)" 
                           status={['idle', 'generating_script', 'script_review'].includes(currentStep) ? 'pending' : currentStep === 'generating_audio' ? 'loading' : currentStep === 'error' && !project?.audioUrl ? 'pending' : currentStep === 'error' && project?.status === 'generating_audio' ? 'error' : 'success'}
-                          onClick={() => setCurrentStep('audio_review')}
+                          onClick={() => navigateWorkflowStep('audio_review')}
                         />
                         <div className="w-0.5 h-4 bg-neutral-200 ml-4"></div>
                         <StatusItem 
                           icon={<Video className="w-4 h-4" />} 
                           label="Vídeo (HeyGen)" 
                           status={['idle', 'generating_script', 'script_review', 'generating_audio', 'audio_review'].includes(currentStep) ? 'pending' : currentStep === 'generating_video' ? 'loading' : currentStep === 'completed' ? 'success' : 'error'}
-                          onClick={() => setCurrentStep('completed')}
+                          onClick={() => navigateWorkflowStep('completed')}
                         />
                       </div>
                     </div>

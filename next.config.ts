@@ -19,7 +19,8 @@ const nextConfig: NextConfig = {
       },
     ],
   },
-  output: 'standalone',
+  // Só em `next build` (produção / Firebase App Hosting). Evita artefactos de standalone em `next dev`.
+  ...(process.env.NODE_ENV === 'production' ? {output: 'standalone' as const} : {}),
   transpilePackages: ['motion'],
   webpack: (config, {dev}) => {
     // HMR is disabled in AI Studio via DISABLE_HMR env var.
