@@ -3,8 +3,10 @@ import { adminAuth, adminDb, isAdminConfigured } from '@/lib/firebase-admin';
 import {
   heygenCreateAvatarVideo,
   heygenListAvatars,
+  heygenLookSupportsEngine,
   heygenUploadAudioAsset,
   type HeyGenBackgroundInput,
+  type HeyGenEngine,
   type HeyGenTalkingPhotoInput,
 } from '@/lib/heygen';
 import { sanitizeApiKeysDoc } from '@/lib/sanitize-api-keys';
@@ -18,13 +20,14 @@ type GenerateVideoPayload = {
   currentAudioCost?: number;
   videoNotes?: string;
   idToken?: string;
+  audioSource?: 'elevenlabs' | 'heygen';
 };
 
 function buildHeygenTitle(projectId: string, notes?: string): string {
   const shortId = projectId.slice(0, 8);
   const human = stripTechnicalDirectives(notes);
-  if (!human) return `NewsGen — ${shortId}`;
-  const combined = `NewsGen — ${shortId} · ${human}`;
+  if (!human) return `Studio — ${shortId}`;
+  const combined = `Studio — ${shortId} · ${human}`;
   return combined.length > 200 ? `${combined.slice(0, 197)}...` : combined;
 }
 
@@ -262,8 +265,11 @@ export async function POST(request: Request) {
     const projectRef = adminDb.collection('users').doc(uid).collection('projects').doc(projectId);
     const snap = await projectRef.get();
     const existing = snap.data() || {};
+    const audioSource =
+      body.audioSource === 'heygen' || existing.audioSource === 'heygen' ? 'heygen' : 'elevenlabs';
     const audioUrl = typeof existing.audioUrl === 'string' ? existing.audioUrl.trim() : '';
-    if (!audioUrl) {
+
+    if (audioSource !== 'heygen' && !audioUrl) {
       return NextResponse.json(
         { error: 'Nenhum audio no projeto. Gere ou envie audio antes do video.' },
         { status: 400 }
@@ -275,7 +281,8 @@ export async function POST(request: Request) {
       unknown
     >;
     const audioTokens = Number(prevCost.audioTokens ?? script.length);
-    const audioCost = Number(prevCost.audioCost ?? body.currentAudioCost ?? 0);
+    const audioCost =
+      audioSource === 'heygen' ? 0 : Number(prevCost.audioCost ?? body.currentAudioCost ?? 0);
 
     const heygenTitle = buildHeygenTitle(projectId, videoNotes);
     const heygenBackground = parseBackgroundFromNotes(videoNotes);
@@ -290,16 +297,33 @@ export async function POST(request: Request) {
         : undefined;
     let videoId: string;
 
+    const voiceInput =
+      audioSource === 'heygen'
+        ? ({ type: 'text' as const, inputText: script })
+        : ({ type: 'audio' as const, audioUrl });
+
+    const preferredEngine: HeyGenEngine =
+      audioSource === 'heygen' && apiKeys.heygenEngine === 'avatar_v' ? 'avatar_v' : 'avatar_iv';
+
+    if (audioSource === 'heygen' && preferredEngine === 'avatar_v') {
+      await heygenLookSupportsEngine(heygenKey, characterId, 'avatar_v');
+    }
+
     try {
       videoId = await heygenCreateAvatarVideo(heygenKey, {
         characterKind,
         characterId,
-        audioUrl,
+        voice: voiceInput,
         title: heygenTitle,
         background: heygenBackground,
         talkingPhoto: heygenTalkingPhoto,
+        engine: audioSource === 'heygen' ? preferredEngine : undefined,
       });
     } catch (firstErr) {
+      if (audioSource === 'heygen') {
+        const f = firstErr instanceof Error ? firstErr.message : String(firstErr);
+        throw new Error(f);
+      }
       try {
         const { buffer, contentType } = await downloadAudio(audioUrl);
         let uploadType = 'audio/mpeg';
@@ -309,7 +333,7 @@ export async function POST(request: Request) {
         videoId = await heygenCreateAvatarVideo(heygenKey, {
           characterKind,
           characterId,
-          audioUrl: heygenAudioUrl,
+          voice: { type: 'audio', audioUrl: heygenAudioUrl },
           title: heygenTitle,
           background: heygenBackground,
           talkingPhoto: heygenTalkingPhoto,
@@ -325,9 +349,17 @@ export async function POST(request: Request) {
       {
         id: projectId,
         status: 'generating_video',
+        audioSource,
         heygenVideoId: videoId,
         videoIsDemo: false,
         ...(videoNotes?.trim() ? { promptInfo: videoNotes.trim() } : {}),
+        cost: {
+          audioTokens,
+          audioCost,
+          videoSeconds: Number(prevCost.videoSeconds ?? 0),
+          videoCost: Number(prevCost.videoCost ?? 0),
+          totalCost: Number(prevCost.totalCost ?? audioCost),
+        },
         updatedAt: new Date().toISOString(),
       },
       { merge: true }

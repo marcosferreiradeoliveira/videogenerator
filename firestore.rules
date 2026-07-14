@@ -16,8 +16,10 @@ service cloud.firestore {
         'elevenlabs',
         'elevenlabsVoiceId',
         'heygen',
+        'heygenVoiceId',
         'heygenCharacterId',
         'heygenCharacterKind',
+        'heygenEngine',
         'kling'
       ]) &&
       (!('gemini' in request.resource.data) || request.resource.data.gemini is string) &&
@@ -25,8 +27,10 @@ service cloud.firestore {
       (!('elevenlabs' in request.resource.data) || request.resource.data.elevenlabs is string) &&
       (!('elevenlabsVoiceId' in request.resource.data) || request.resource.data.elevenlabsVoiceId is string) &&
       (!('heygen' in request.resource.data) || request.resource.data.heygen is string) &&
+      (!('heygenVoiceId' in request.resource.data) || request.resource.data.heygenVoiceId is string) &&
       (!('heygenCharacterId' in request.resource.data) || request.resource.data.heygenCharacterId is string) &&
       (!('heygenCharacterKind' in request.resource.data) || request.resource.data.heygenCharacterKind is string) &&
+      (!('heygenEngine' in request.resource.data) || request.resource.data.heygenEngine is string) &&
       (!('kling' in request.resource.data) || request.resource.data.kling is string);
     }
 
@@ -37,6 +41,11 @@ service cloud.firestore {
     }
 
     match /users/{userId}/projects/{projectId} {
+      allow read, create, update: if isOwner(userId);
+      allow delete: if false;
+    }
+
+    match /users/{userId}/translations/{translationId} {
       allow read, create, update: if isOwner(userId);
       allow delete: if false;
     }

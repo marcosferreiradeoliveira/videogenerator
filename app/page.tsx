@@ -3,7 +3,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import Image from 'next/image';
 import { motion, AnimatePresence } from 'motion/react';
-import heroVisual from '@/lib/assets/imagem.jpeg';
+import heroVisual from '@/lib/assets/studio-hero.jpeg';
 import { 
   Settings, 
   Video, 
@@ -22,9 +22,12 @@ import {
   LogOut,
   HelpCircle,
   X,
-  Library
+  Library,
+  Languages,
 } from 'lucide-react';
 import { ApiKeys, GenerationCost, VideoProject } from '@/types';
+import { VideoTranslationTab } from '@/components/VideoTranslationTab';
+import { SiteFooter, SiteHeader, PoweredByBuildAI } from '@/components/SiteChrome';
 import { GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signOut, type User } from 'firebase/auth';
 import { collection, doc, getDoc, getDocs, orderBy, query, setDoc } from 'firebase/firestore';
 import { firebaseAuth, firebaseDb, isFirebaseConfigured } from '@/lib/firebase';
@@ -34,20 +37,15 @@ const INITIAL_KEYS: ApiKeys = {
   elevenlabs: '',
   elevenlabsVoiceId: '',
   heygen: '',
+  heygenVoiceId: '',
   heygenCharacterId: '',
   heygenCharacterKind: 'avatar',
+  heygenEngine: 'avatar_v',
   kling: '',
   openai: '',
 };
 
-const VIDEO_DURATION_PRESETS: { value: number; label: string }[] = [
-  { value: 30, label: '30 segundos' },
-  { value: 45, label: '45 segundos' },
-  { value: 60, label: '1 minuto' },
-  { value: 90, label: '1 minuto e 30 segundos' },
-  { value: 120, label: '2 minutos' },
-  { value: 180, label: '3 minutos' },
-];
+const DEFAULT_VIDEO_DURATION_SECONDS = 60;
 
 const isProdBuild = process.env.NODE_ENV === 'production';
 
@@ -115,11 +113,20 @@ const KEY_HELP_CONTENT: Record<keyof ApiKeys, { title: string; steps: string[]; 
   heygenCharacterId: {
     title: 'HeyGen — ID do personagem',
     steps: [
-      'Em Configurações, clique em "Carregar personagens HeyGen" (com a API key preenchida).',
-      'Escolha um avatar na lista ou cole manualmente um avatar_id da API List Avatars V2.',
-      'Use apenas Avatar (nao Talking Photo) para melhor resultado neste app.',
+      'Em Config, carregue a lista de personagens HeyGen (com a API key preenchida).',
+      'Escolha um avatar na lista ou cole um avatar_id / look_id.',
+      'Para Avatar V, use um look Digital Twin elegível (supported_api_engines).',
     ],
     link: 'https://docs.heygen.com/reference/list-avatars-v2',
+  },
+  heygenVoiceId: {
+    title: 'HeyGen — voz do avatar',
+    steps: [
+      'Nao e necessario configurar Voice ID neste app.',
+      'A narração usa automaticamente a voz padrao do avatar escolhido em "ID do personagem".',
+      'Se precisar de outra voz, troque o avatar no HeyGen.',
+    ],
+    link: 'https://developers.heygen.com/docs/quick-start',
   },
   heygenCharacterKind: {
     title: 'Tipo de personagem HeyGen',
@@ -128,6 +135,16 @@ const KEY_HELP_CONTENT: Record<keyof ApiKeys, { title: string; steps: string[]; 
       'Se estava em Talking Photo, altere para Avatar e use um avatar_id.',
     ],
     link: 'https://docs.heygen.com/docs/create-videos-with-avatars',
+  },
+  heygenEngine: {
+    title: 'HeyGen — motor Avatar IV / Avatar V',
+    steps: [
+      'Avatar V e o motor de maior fidelidade (opt-in). Exige um look Digital Twin com avatar_v em supported_api_engines.',
+      'Em Configuracoes, escolha Avatar V e cole o look_id elegivel (GET /v3/avatars/looks/{look_id}).',
+      'Se o personagem nao for elegivel, a geracao falha com mensagem clara — use Avatar IV nesse caso.',
+      'Avatar IV e o padrao da API e funciona com a maioria dos avatares.',
+    ],
+    link: 'https://developers.heygen.com/docs/avatar-v',
   },
   kling: {
     title: 'Como obter Kling API Key',
@@ -142,7 +159,7 @@ const KEY_HELP_CONTENT: Record<keyof ApiKeys, { title: string; steps: string[]; 
 };
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<'generator' | 'settings' | 'content'>('generator');
+  const [activeTab, setActiveTab] = useState<'generator' | 'translation' | 'settings' | 'content'>('generator');
   const [apiKeys, setApiKeys] = useState<ApiKeys>(INITIAL_KEYS);
   const [user, setUser] = useState<User | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(true);
@@ -157,10 +174,10 @@ export default function Home() {
   const [heygenAvatars, setHeygenAvatars] = useState<{ avatar_id: string; avatar_name: string }[]>([]);
   const [heygenListLoading, setHeygenListLoading] = useState(false);
   const [heygenListError, setHeygenListError] = useState<string | null>(null);
+  const [audioSourceMode, setAudioSourceMode] = useState<'elevenlabs' | 'heygen'>('heygen');
 
   // Generator State
   const [rawMaterial, setRawMaterial] = useState('');
-  const [targetVideoDurationSeconds, setTargetVideoDurationSeconds] = useState(60);
   const [editableScript, setEditableScript] = useState('');
   /** Instruções extras para o vídeo (HeyGen), preenchidas na revisão de áudio. */
   const [videoPromptInfo, setVideoPromptInfo] = useState('');
@@ -182,7 +199,7 @@ export default function Home() {
     const timeoutId = window.setTimeout(() => {
       if (!cancelled) {
         console.warn(
-          '[NewsGen] Firebase Auth demorou a responder; a verificacao de sessao foi interrompida. Verifique rede, bloqueadores e dominios autorizados no Firebase Console.'
+          '[Studio] Firebase Auth demorou a responder; a verificacao de sessao foi interrompida. Verifique rede, bloqueadores e dominios autorizados no Firebase Console.'
         );
         setIsAuthLoading(false);
       }
@@ -273,7 +290,12 @@ export default function Home() {
   }, [project?.id]);
 
   useEffect(() => {
-    if (currentStep !== 'script_review' || !apiKeys.elevenlabs || !firebaseAuth?.currentUser) {
+    if (
+      currentStep !== 'script_review' ||
+      audioSourceMode !== 'elevenlabs' ||
+      !apiKeys.elevenlabs ||
+      !firebaseAuth?.currentUser
+    ) {
       return;
     }
     const authUser = firebaseAuth.currentUser;
@@ -314,7 +336,7 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [currentStep, apiKeys.elevenlabs, user]);
+  }, [currentStep, audioSourceMode, apiKeys.elevenlabs, user]);
 
   const persistProject = async (projectData: VideoProject) => {
     if (!firebaseDb || !user) return;
@@ -367,8 +389,8 @@ export default function Home() {
     const created: VideoProject = {
       id: Math.random().toString(36).substring(7),
       date: new Date().toISOString(),
-      rawMaterial: rawMaterial.trim() || '(roteiro sem material bruto)',
-      targetVideoDurationSeconds,
+      rawMaterial: rawMaterial.trim() || '(roteiro sem texto de origem)',
+      targetVideoDurationSeconds: DEFAULT_VIDEO_DURATION_SECONDS,
       generatedScript: editableScript,
       status: 'script_review',
     };
@@ -475,7 +497,7 @@ export default function Home() {
 
   const handleGenerateScript = async () => {
     if (!rawMaterial) {
-      alert('Por favor, insira o material bruto da reportagem.');
+      alert('Cole o texto ou notas que quer transformar em vídeo.');
       return;
     }
     setIsGenerating(true);
@@ -486,7 +508,7 @@ export default function Home() {
       id: Math.random().toString(36).substring(7),
       date: new Date().toISOString(),
       rawMaterial,
-      targetVideoDurationSeconds,
+      targetVideoDurationSeconds: DEFAULT_VIDEO_DURATION_SECONDS,
       status: 'generating_script',
     };
     setProject(newProject);
@@ -505,7 +527,7 @@ export default function Home() {
           projectId: newProject.id,
           rawMaterial,
           promptInfo: '',
-          targetVideoDurationSeconds,
+          targetVideoDurationSeconds: DEFAULT_VIDEO_DURATION_SECONDS,
           idToken,
         }),
       });
@@ -602,6 +624,7 @@ export default function Home() {
         ...baseProject,
         generatedScript: editableScript,
         status: 'audio_review',
+        audioSource: 'elevenlabs',
         audioUrl: data.audioUrl as string,
         cost: data.cost,
       };
@@ -622,6 +645,47 @@ export default function Home() {
     } finally {
       setIsGenerating(false);
     }
+  };
+
+  const handleApproveWithHeygenVoice = async () => {
+    if (!apiKeys.heygen?.trim()) {
+      alert('Configure a API Key do HeyGen em Config.');
+      setActiveTab('settings');
+      return;
+    }
+    if (!apiKeys.heygenCharacterId?.trim()) {
+      alert('Escolha ou cole o ID do personagem HeyGen em Config.');
+      setActiveTab('settings');
+      return;
+    }
+    const baseProject = await resolveActiveProject();
+    if (!baseProject) {
+      alert('Projeto não encontrado. Gere o roteiro novamente.');
+      setCurrentStep('idle');
+      return;
+    }
+    if (!editableScript.trim()) {
+      alert('O roteiro está vazio.');
+      return;
+    }
+
+    const cost: GenerationCost = {
+      audioTokens: editableScript.length,
+      audioCost: 0,
+      videoSeconds: 0,
+      videoCost: 0,
+      totalCost: 0,
+    };
+    const readyProject: VideoProject = {
+      ...baseProject,
+      generatedScript: editableScript,
+      status: 'audio_review',
+      audioSource: 'heygen',
+      cost,
+    };
+    setProject(readyProject);
+    await persistProject(readyProject);
+    setCurrentStep('audio_review');
   };
 
   const handleUploadTestAudio = async () => {
@@ -674,6 +738,7 @@ export default function Home() {
         ...baseProject,
         generatedScript: editableScript,
         status: 'audio_review',
+        audioSource: 'elevenlabs',
         audioUrl: data.audioUrl as string,
         cost: data.cost as GenerationCost,
       };
@@ -700,8 +765,8 @@ export default function Home() {
 
   const handleGenerateVideo = async () => {
     const activeProject =
-      (project?.id && project.audioUrl ? project : null) ??
-      savedProjects.find((p) => p.audioUrl && p.cost);
+      (project?.id && (project.audioUrl || project.audioSource === 'heygen') ? project : null) ??
+      savedProjects.find((p) => p.audioSource === 'heygen' || (p.audioUrl && p.cost));
     if (!activeProject?.id) {
       alert('Projeto não encontrado. Gere o roteiro novamente.');
       setCurrentStep('idle');
@@ -711,22 +776,23 @@ export default function Home() {
       setProject(activeProject);
       if (activeProject.generatedScript) setEditableScript(activeProject.generatedScript);
     }
-    if (!activeProject.cost) {
+    const usesHeygenVoice = activeProject.audioSource === 'heygen';
+    if (!usesHeygenVoice && !activeProject.cost) {
       alert('Custo de áudio não encontrado. Gere o áudio novamente.');
       setCurrentStep('script_review');
       return;
     }
-    if (!activeProject.audioUrl) {
+    if (!usesHeygenVoice && !activeProject.audioUrl) {
       alert('É necessário ter áudio no projeto antes de gerar o vídeo.');
       return;
     }
     if (!apiKeys.heygen?.trim()) {
-      alert('Configure a API Key do HeyGen em Configurações.');
+      alert('Configure a API Key do HeyGen em Config.');
       setActiveTab('settings');
       return;
     }
     if (!apiKeys.heygenCharacterId?.trim()) {
-      alert('Escolha ou cole o ID do personagem HeyGen (avatar ou talking photo) em Configurações.');
+      alert('Escolha ou cole o ID do personagem HeyGen (avatar ou talking photo) em Config.');
       setActiveTab('settings');
       return;
     }
@@ -766,6 +832,7 @@ export default function Home() {
           script: editableScript,
           currentAudioCost: baseProject.cost?.audioCost || 0,
           videoNotes: videoNotesTrim,
+          audioSource: usesHeygenVoice ? 'heygen' : 'elevenlabs',
           idToken,
         }),
       });
@@ -906,315 +973,287 @@ export default function Home() {
 
   if (isAuthLoading) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-950 via-indigo-950 to-slate-900 flex items-center justify-center">
-        <div className="flex items-center gap-3 text-indigo-100/90">
-          <Loader2 className="w-5 h-5 animate-spin text-indigo-300" />
-          <span className="text-sm font-medium tracking-wide">A verificar sessão…</span>
-        </div>
+      <div className="relative min-h-screen flex items-center justify-center overflow-hidden">
+        <div className="absolute inset-0 stage-grid opacity-40" aria-hidden />
+        <motion.div
+          initial={{ opacity: 0, scale: 0.96 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="relative flex flex-col items-center gap-4"
+        >
+          <div className="h-14 w-14 rounded-2xl bg-signal/15 ring-1 ring-signal/30 flex items-center justify-center">
+            <Loader2 className="w-6 h-6 animate-spin text-signal" />
+          </div>
+          <p className="font-display text-sm tracking-wide text-mist">A carregar…</p>
+        </motion.div>
       </div>
     );
   }
 
   if (!user) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-950 via-indigo-950 to-slate-900 text-white overflow-x-hidden">
-        <div className="absolute inset-0 overflow-hidden pointer-events-none">
-          <div
-            className="absolute -top-32 -right-32 h-96 w-96 rounded-full bg-indigo-500/20 blur-3xl"
-            aria-hidden
-          />
-          <div
-            className="absolute bottom-0 left-1/4 h-64 w-64 rounded-full bg-cyan-500/10 blur-3xl"
-            aria-hidden
-          />
-        </div>
+      <div className="relative min-h-screen overflow-x-hidden text-foam flex flex-col">
+        <div className="absolute inset-0 stage-grid opacity-50" aria-hidden />
+        <div className="absolute -top-40 left-0 h-[28rem] w-[28rem] rounded-full bg-signal/10 blur-3xl" aria-hidden />
+        <div className="absolute bottom-0 right-0 h-72 w-72 rounded-full bg-warm/10 blur-3xl" aria-hidden />
 
-        <div className="relative z-10 mx-auto flex min-h-screen max-w-7xl flex-col lg:flex-row">
-          <div className="flex flex-1 flex-col justify-center px-6 pb-10 pt-14 sm:px-10 lg:px-14 lg:py-16 lg:pr-8">
-            <p className="mb-4 inline-flex w-fit items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-medium uppercase tracking-wider text-indigo-200/90 backdrop-blur-sm">
-              <Sparkles className="h-3.5 w-3.5" />
-              Estúdio de vídeo com IA
-            </p>
-            <h1 className="text-4xl font-bold leading-tight tracking-tight sm:text-5xl lg:text-[2.75rem]">
-              NewsGen AI
-            </h1>
-            <p className="mt-4 max-w-xl text-lg leading-relaxed text-indigo-100/85">
-              Uma ferramenta para jornalistas e criadores: cola o <strong className="font-semibold text-white">material
-              bruto</strong> da notícia e obténs um <strong className="font-semibold text-white">roteiro</strong> pronto
-              para âncora, <strong className="font-semibold text-white">voz sintética</strong> natural (ElevenLabs) e um{' '}
-              <strong className="font-semibold text-white">vídeo com avatar</strong> (HeyGen) — tudo guardado na tua
-              conta.
-            </p>
+        <SiteHeader
+          variant="marketing"
+          onSignIn={isFirebaseConfigured ? handleGoogleSignIn : undefined}
+        />
 
-            <ul className="mt-8 space-y-4 max-w-lg">
-              <li className="flex gap-3">
-                <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-white/10 ring-1 ring-white/10">
-                  <FileText className="h-4 w-4 text-indigo-200" />
+        <div className="relative z-10 mx-auto flex w-full flex-1 max-w-6xl flex-col lg:flex-row lg:items-center gap-12 lg:gap-20 px-6 py-12 sm:px-10">
+          <div id="recursos" className="flex flex-1 flex-col justify-center max-w-xl scroll-mt-20">
+            <motion.div
+              initial={{ opacity: 0, y: 16 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.5 }}
+            >
+              <p className="font-display text-5xl font-extrabold leading-[0.92] tracking-tight sm:text-6xl lg:text-7xl">
+                Studio
+              </p>
+              <h1 className="mt-5 font-display text-2xl font-semibold leading-snug tracking-tight text-foam sm:text-3xl">
+                Vídeos com avatar, do texto ao render.
+              </h1>
+              <p className="mt-4 max-w-md text-base leading-relaxed text-mist sm:text-[1.05rem]">
+                Um fluxo único para transformar conteúdo em peça pronta: roteiro, voz e apresentador virtual —
+                com controlo em cada etapa.
+              </p>
+            </motion.div>
+
+            <motion.ul
+              initial={{ opacity: 0, y: 18 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.5, delay: 0.12 }}
+              className="mt-10 space-y-6"
+            >
+              <li className="flex gap-4">
+                <span className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-signal/10 ring-1 ring-signal/25">
+                  <DollarSign className="h-4 w-4 text-signal" />
                 </span>
                 <div>
-                  <p className="font-medium text-white">Roteiro com Gemini ou OpenAI</p>
-                  <p className="text-sm text-indigo-200/75">
-                    A IA condensa factos e notas num texto de cerca de um minuto, com tom de telejornal.
+                  <p className="font-display text-base font-semibold text-foam">Custo via API, sem markup de plataforma</p>
+                  <p className="mt-1 text-sm leading-relaxed text-mist">
+                    Paga só o consumo das APIs (HeyGen, ElevenLabs, Gemini/OpenAI). Em média, até 60% mais barato
+                    do que produzir o mesmo vídeo nas interfaces e planos das ferramentas.
                   </p>
                 </div>
               </li>
-              <li className="flex gap-3">
-                <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-white/10 ring-1 ring-white/10">
-                  <Mic className="h-4 w-4 text-indigo-200" />
+              <li className="flex gap-4">
+                <span className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-signal/10 ring-1 ring-signal/25">
+                  <FileText className="h-4 w-4 text-signal" />
                 </span>
                 <div>
-                  <p className="font-medium text-white">Narração em áudio</p>
-                  <p className="text-sm text-indigo-200/75">
-                    Escolhes a voz; o servidor gera o áudio e podes ouvir antes de avançar.
+                  <p className="font-display text-base font-semibold text-foam">Roteiro sob medida</p>
+                  <p className="mt-1 text-sm leading-relaxed text-mist">
+                    A IA adapta o seu texto à duração escolhida — claro, direto e pronto para narração.
                   </p>
                 </div>
               </li>
-              <li className="flex gap-3">
-                <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-white/10 ring-1 ring-white/10">
-                  <Video className="h-4 w-4 text-indigo-200" />
+              <li className="flex gap-4">
+                <span className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-signal/10 ring-1 ring-signal/25">
+                  <Mic className="h-4 w-4 text-signal" />
                 </span>
                 <div>
-                  <p className="font-medium text-white">Vídeo com apresentador virtual</p>
-                  <p className="text-sm text-indigo-200/75">
-                    O HeyGen sincroniza o teu áudio com um avatar — ideal para peças rápidas para redes ou interno.
+                  <p className="font-display text-base font-semibold text-foam">Voz do avatar ou ElevenLabs</p>
+                  <p className="mt-1 text-sm leading-relaxed text-mist">
+                    Use a voz nativa do personagem HeyGen ou gere áudio com ElevenLabs — e revise antes do vídeo.
                   </p>
                 </div>
               </li>
-            </ul>
+              <li id="fluxo" className="flex gap-4 scroll-mt-24">
+                <span className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-signal/10 ring-1 ring-signal/25">
+                  <Video className="h-4 w-4 text-signal" />
+                </span>
+                <div>
+                  <p className="font-display text-base font-semibold text-foam">Render com Avatar IV ou V</p>
+                  <p className="mt-1 text-sm leading-relaxed text-mist">
+                    Produza o vídeo com o seu avatar HeyGen, escolha o motor de render e acompanhe até à entrega.
+                  </p>
+                </div>
+              </li>
+              <li className="flex gap-4">
+                <span className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-signal/10 ring-1 ring-signal/25">
+                  <Languages className="h-4 w-4 text-signal" />
+                </span>
+                <div>
+                  <p className="font-display text-base font-semibold text-foam">Tradução de vídeo</p>
+                  <p className="mt-1 text-sm leading-relaxed text-mist">
+                    Envie um vídeo existente e receba a mesma peça com áudio traduzido e sincronizado.
+                  </p>
+                </div>
+              </li>
+            </motion.ul>
+          </div>
 
-            <div className="mt-10 w-full max-w-md rounded-2xl border border-white/10 bg-white/[0.07] p-6 shadow-2xl backdrop-blur-md">
-              <p className="text-sm text-indigo-100/90">
+          <motion.div
+            id="entrar"
+            initial={{ opacity: 0, x: 16 }}
+            animate={{ opacity: 1, x: 0 }}
+            transition={{ duration: 0.45, delay: 0.18 }}
+            className="w-full max-w-md lg:w-[22rem] shrink-0 lg:ml-auto flex flex-col gap-4 scroll-mt-24"
+          >
+            <div className="relative overflow-hidden rounded-[1.25rem] border border-line bg-panel">
+              <div className="relative aspect-[4/3] w-full">
+                <Image
+                  src={heroVisual}
+                  alt="Avatar em estúdio de geração de vídeo"
+                  fill
+                  priority
+                  className="object-cover object-center"
+                  sizes="(max-width: 1024px) 100vw, 22rem"
+                />
+              </div>
+            </div>
+
+            <div
+              id="custo"
+              className="rounded-xl border border-signal/30 bg-signal/10 px-4 py-3 scroll-mt-24"
+            >
+              <p className="font-display text-2xl font-extrabold leading-none text-signal">até 60%</p>
+              <p className="mt-1.5 text-sm leading-snug text-foam/90">
+                mais barato via APIs do que no HeyGen e ferramentas similares
+              </p>
+            </div>
+
+            <div className="panel p-6 sm:p-8">
+              <p className="font-display text-xl font-bold text-foam">Entrar</p>
+              <p className="mt-2 text-sm leading-relaxed text-mist">
                 {isFirebaseConfigured
-                  ? 'Inicia sessão com Google para guardar projetos e chaves de API de forma privada no Firebase.'
+                  ? 'Aceda com Google para guardar projetos, avatares e chaves de API com segurança.'
                   : isProdBuild
-                    ? 'As variáveis públicas do Firebase não estão neste build — configura-as no painel de hospedagem (ver abaixo).'
-                    : 'Configura o Firebase no projeto para ativar o login e a base de dados.'}
+                    ? 'As variáveis públicas do Firebase não estão neste build — configura-as no painel de hospedagem.'
+                    : 'Configura o Firebase no projeto para ativar o login.'}
               </p>
               {isFirebaseConfigured ? (
-                <button
-                  type="button"
-                  onClick={handleGoogleSignIn}
-                  className="mt-5 w-full rounded-xl bg-white py-3.5 text-sm font-semibold text-slate-900 shadow-lg transition hover:bg-indigo-50"
-                >
-                  Entrar com Google
+                <button type="button" onClick={handleGoogleSignIn} className="btn-primary mt-6 w-full">
+                  Continuar com Google
                 </button>
               ) : isProdBuild ? (
-                <div className="mt-5 space-y-3 rounded-xl border border-amber-400/30 bg-amber-500/10 p-4 text-sm leading-relaxed text-amber-50">
+                <div className="mt-5 space-y-3 rounded-xl border border-warn/30 bg-warn/10 p-4 text-sm leading-relaxed text-foam/90">
                   <p>
                     No{' '}
                     <a
                       href="https://console.firebase.google.com/"
                       target="_blank"
                       rel="noreferrer"
-                      className="font-semibold text-white underline decoration-amber-300/80 underline-offset-2 hover:text-amber-100"
+                      className="font-semibold text-signal underline underline-offset-2"
                     >
                       Firebase Console
                     </a>
-                    : <strong className="text-white">App Hosting</strong> → o teu backend →{' '}
-                    <strong className="text-white">Environment</strong>. Adiciona as seis variáveis do teu app web (
-                    <em className="text-amber-100/90">Project settings</em>
-                    {` → General → Your apps → SDK setup and configuration): `}
-                    <code className="rounded bg-black/25 px-1 py-0.5 text-xs">NEXT_PUBLIC_FIREBASE_API_KEY</code>,{' '}
-                    <code className="rounded bg-black/25 px-1 py-0.5 text-xs">NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN</code>,{' '}
-                    <code className="rounded bg-black/25 px-1 py-0.5 text-xs">NEXT_PUBLIC_FIREBASE_PROJECT_ID</code>,{' '}
-                    <code className="rounded bg-black/25 px-1 py-0.5 text-xs">NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET</code>,{' '}
-                    <code className="rounded bg-black/25 px-1 py-0.5 text-xs">NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID</code>,{' '}
-                    <code className="rounded bg-black/25 px-1 py-0.5 text-xs">NEXT_PUBLIC_FIREBASE_APP_ID</code>.
-                  </p>
-                  <p className="text-amber-100/95">
-                    Grava as alterações e corre <strong className="text-white">novo deploy</strong> (as{' '}
-                    <code className="rounded bg-black/25 px-1 text-xs">NEXT_PUBLIC_*</code> entram no bundle na altura do
-                    build).
+                    : App Hosting → Environment. Adiciona as variáveis{' '}
+                    <code className="rounded bg-ink px-1 text-xs">NEXT_PUBLIC_FIREBASE_*</code>.
                   </p>
                 </div>
               ) : (
-                <div className="mt-5 rounded-xl border border-amber-400/30 bg-amber-500/10 p-4 text-sm text-amber-100">
-                  Cria <code className="rounded bg-black/20 px-1.5 py-0.5 text-xs">.env.local</code> na raiz com{' '}
-                  <code className="rounded bg-black/20 px-1.5 py-0.5 text-xs">NEXT_PUBLIC_FIREBASE_*</code> e reinicia{' '}
-                  <code className="rounded bg-black/20 px-1.5 py-0.5 text-xs">npm run dev</code>.
+                <div className="mt-5 rounded-xl border border-warn/30 bg-warn/10 p-4 text-sm text-foam/90">
+                  Cria <code className="rounded bg-ink px-1.5 text-xs">.env.local</code> com{' '}
+                  <code className="rounded bg-ink px-1.5 text-xs">NEXT_PUBLIC_FIREBASE_*</code> e reinicia o dev server.
                 </div>
               )}
-            </div>
-          </div>
-
-          <div className="relative flex flex-1 items-center justify-center px-6 pb-16 pt-4 sm:px-10 lg:px-14 lg:py-16 lg:pl-4">
-            <div className="relative w-full max-w-xl">
-              <div
-                className="absolute -inset-4 rounded-[2rem] bg-gradient-to-br from-indigo-500/40 via-transparent to-cyan-400/20 blur-2xl"
-                aria-hidden
-              />
-              <div className="relative overflow-hidden rounded-[1.75rem] shadow-2xl ring-1 ring-white/15">
-                <div className="relative aspect-[4/3] w-full sm:aspect-[16/11]">
-                  <Image
-                    src={heroVisual}
-                    alt="Ambiente de estúdio e ecrãs — ilustração do NewsGen AI"
-                    fill
-                    priority
-                    className="object-cover"
-                    sizes="(max-width: 1024px) 100vw, 50vw"
-                  />
-                  <div className="absolute inset-0 bg-gradient-to-t from-slate-950/70 via-slate-950/20 to-transparent" />
-                  <div className="absolute bottom-0 left-0 right-0 p-6 sm:p-8">
-                    <p className="text-xs font-semibold uppercase tracking-widest text-indigo-200/90">Do texto ao vídeo</p>
-                    <p className="mt-1 max-w-sm text-sm leading-relaxed text-white/95">
-                      Fluxo guiado: material → roteiro → áudio → vídeo final, com histórico nos Conteúdos gerados.
-                    </p>
-                  </div>
-                </div>
+              {isFirebaseConfigured ? (
+                <p className="mt-5 text-center text-xs text-mist/80">
+                  Projetos e definições ficam privados na sua conta.
+                </p>
+              ) : null}
+              <div className="mt-6 flex justify-center border-t border-line/60 pt-5">
+                <PoweredByBuildAI />
               </div>
             </div>
-          </div>
+          </motion.div>
         </div>
+
+        <SiteFooter />
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-neutral-50 text-neutral-900 font-sans flex flex-col md:flex-row">
-      {/* Sidebar */}
-      <aside className="w-full md:w-64 bg-white border-r border-neutral-200 p-6 flex flex-col gap-8">
-        <div>
-          <h1 className="text-xl font-bold tracking-tight flex items-center gap-2 text-indigo-600">
-            <Video className="w-6 h-6" />
-            NewsGen AI
-          </h1>
-          <p className="text-xs text-neutral-500 mt-1">Automated Video Workflows</p>
-        </div>
+    <div className="min-h-screen text-foam font-sans flex flex-col">
+      <SiteHeader
+        variant="app"
+        onSignOut={handleSignOut}
+        userLabel={user.displayName || undefined}
+        userEmail={user.email || undefined}
+        userPhotoUrl={user.photoURL}
+      />
 
-        <nav className="flex flex-col gap-2">
-          <button
-            onClick={() => setActiveTab('generator')}
-            className={`flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-colors ${
-              activeTab === 'generator' 
-                ? 'bg-indigo-50 text-indigo-700' 
-                : 'text-neutral-600 hover:bg-neutral-100'
-            }`}
-          >
-            <Play className="w-4 h-4" />
-            Gerador
-          </button>
-          <button
-            onClick={() => setActiveTab('settings')}
-            className={`flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-colors ${
-              activeTab === 'settings' 
-                ? 'bg-indigo-50 text-indigo-700' 
-                : 'text-neutral-600 hover:bg-neutral-100'
-            }`}
-          >
-            <Settings className="w-4 h-4" />
-            Configurações (API)
-          </button>
-          <button
-            onClick={() => setActiveTab('content')}
-            className={`flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-colors ${
-              activeTab === 'content'
-                ? 'bg-indigo-50 text-indigo-700'
-                : 'text-neutral-600 hover:bg-neutral-100'
-            }`}
-          >
-            <Library className="w-4 h-4" />
-            Conteúdos Gerados
-          </button>
-        </nav>
-
-        <div className="mt-auto pt-6 border-t border-neutral-200">
-          <div className="flex items-center gap-3">
-            {user.photoURL ? (
-              <img src={user.photoURL} alt={user.displayName || 'Usuário'} className="w-9 h-9 rounded-full object-cover" />
-            ) : (
-              <div className="w-9 h-9 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center text-sm font-semibold">
-                {(user.displayName || user.email || 'U').charAt(0).toUpperCase()}
-              </div>
-            )}
-            <div className="min-w-0">
-              <p className="text-sm font-medium text-neutral-800 truncate">{user.displayName || 'Usuário'}</p>
-              <p className="text-xs text-neutral-500 truncate">{user.email}</p>
-            </div>
-          </div>
-        </div>
-      </aside>
-
-      {/* Main Content */}
-      <main className="flex-1 p-6 md:p-12 overflow-y-auto">
-        <div className="max-w-4xl mx-auto w-full">
-          <div className="mb-6 flex flex-wrap items-center justify-end gap-3">
-            <button
-              type="button"
-              onClick={handleSignOut}
-              className="inline-flex items-center gap-2 rounded-xl border border-neutral-300 bg-white px-4 py-2.5 text-sm font-medium text-neutral-700 shadow-sm transition-colors hover:bg-neutral-50"
-            >
-              <LogOut className="h-4 w-4 shrink-0" />
-              Sair
-            </button>
-          </div>
-          <AnimatePresence mode="wait">
-            {activeTab === 'generator' ? (
-              <motion.div
-                key="generator"
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -10 }}
-                className="space-y-8"
+      <div className="flex flex-1 flex-col md:flex-row min-h-0">
+        <aside className="w-full md:w-56 bg-ink-2/95 border-b md:border-b-0 md:border-r border-line backdrop-blur-xl p-4 md:p-5 flex flex-col gap-4 relative z-10 shrink-0">
+          <p className="label-caps px-2 hidden md:block">Navegação</p>
+          <nav className="flex md:flex-col gap-1.5 overflow-x-auto">
+            {(
+              [
+                { id: 'generator' as const, label: 'Estúdio', icon: Play },
+                { id: 'translation' as const, label: 'Tradução', icon: Languages },
+                { id: 'content' as const, label: 'Biblioteca', icon: Library },
+                { id: 'settings' as const, label: 'Config', icon: Settings },
+              ] as const
+            ).map(({ id, label, icon: Icon }) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setActiveTab(id)}
+                className={`nav-item whitespace-nowrap ${activeTab === id ? 'nav-item-active' : 'nav-item-idle'}`}
               >
-                <div>
-                  <h2 className="text-2xl font-bold tracking-tight">Gerar Novo Vídeo</h2>
-                  <p className="text-neutral-500 mt-1">Comece pelo material bruto; o avatar HeyGen e as notas para o vídeo ficam nas etapas seguintes.</p>
-                </div>
+                <Icon className="w-4 h-4" />
+                {label}
+              </button>
+            ))}
+          </nav>
+        </aside>
 
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                  {/* Main Action Area */}
-                  <div className="lg:col-span-2 space-y-6 bg-white p-6 rounded-2xl border border-neutral-200 shadow-sm">
-                    
-                    {/* Step 1: Raw Material Input */}
-                    {['idle', 'generating_script'].includes(currentStep) && (
-                      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
-                        <div className="space-y-2">
-                          <label className="flex items-center gap-2 text-sm font-medium text-neutral-700">
-                            <FileText className="w-4 h-4" />
-                            Material Bruto da Reportagem *
-                          </label>
-                          <textarea
-                            value={rawMaterial}
+        <main className="flex-1 p-6 md:p-10 overflow-y-auto relative min-h-0">
+          <div className="pointer-events-none absolute inset-0 stage-grid opacity-30" aria-hidden />
+          <div className="relative max-w-5xl mx-auto w-full">
+            <AnimatePresence mode="wait">
+              {activeTab === 'generator' ? (
+                <motion.div
+                  key="generator"
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -10 }}
+                  className="space-y-8"
+                >
+                  <div>
+                    <h2 className="font-display text-3xl font-bold tracking-tight">Novo vídeo</h2>
+                    <p className="text-mist mt-1">Escreva o conteúdo, revise o roteiro e gere o vídeo com o seu avatar.</p>
+                  </div>
+
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                    {/* Main Action Area */}
+                    <div className="lg:col-span-2 space-y-6 panel p-6 ">
+
+                      {/* Step 1: Raw Material Input */}
+                      {['idle', 'generating_script'].includes(currentStep) && (
+                        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
+                          <div className="space-y-2">
+                            <label className="flex items-center gap-2 text-sm font-medium text-foam/85">
+                              <FileText className="w-4 h-4" />
+                              Texto de origem *
+                            </label>
+                            <textarea
+                              value={rawMaterial}
                             onChange={(e) => setRawMaterial(e.target.value)}
-                            placeholder="Cole aqui os dados, fatos ou a reportagem bruta. A IA transforma o material num roteiro proporcional à duração escolhida abaixo."
-                            className="w-full h-40 px-4 py-3 rounded-xl border border-neutral-300 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-shadow resize-none text-sm"
+                            placeholder="Cole fatos, notas ou um rascunho. A IA gera um roteiro pronto para narração."
+                            className="input-field h-40 resize-none focus:ring-2 focus:ring-signal/25 focus:border-signal/50 outline-none transition-shadow text-sm"
                             disabled={isGenerating}
                           />
-                        </div>
-
-                        <div className="space-y-2">
-                          <label className="text-sm font-medium text-neutral-700">Duração prevista do vídeo</label>
-                          <select
-                            value={targetVideoDurationSeconds}
-                            onChange={(e) => setTargetVideoDurationSeconds(Number(e.target.value))}
-                            disabled={isGenerating}
-                            className="w-full px-4 py-3 rounded-xl border border-neutral-300 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-shadow text-sm bg-white"
-                          >
-                            {VIDEO_DURATION_PRESETS.map((opt) => (
-                              <option key={opt.value} value={opt.value}>
-                                {opt.label}
-                              </option>
-                            ))}
-                          </select>
-                          <p className="text-xs text-neutral-500">
-                            O roteiro será gerado com extensão compatível com essa duração de narração (ritmo de telejornal).
-                          </p>
                         </div>
 
                         <button
                           onClick={handleGenerateScript}
                           disabled={isGenerating || !rawMaterial}
-                          className="w-full py-4 bg-indigo-600 hover:bg-indigo-700 disabled:bg-neutral-300 disabled:cursor-not-allowed text-white rounded-xl font-medium transition-colors flex items-center justify-center gap-2 shadow-sm"
+                          className="btn-primary w-full py-4"
                         >
                           {isGenerating ? (
                             <>
                               <Loader2 className="w-5 h-5 animate-spin" />
-                              Gerando Roteiro...
+                              A gerar roteiro…
                             </>
                           ) : (
                             <>
                               <Sparkles className="w-5 h-5" />
-                              Gerar Roteiro
+                              Gerar roteiro
                             </>
                           )}
                         </button>
@@ -1226,51 +1265,97 @@ export default function Home() {
                       <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
                         <div className="flex items-center justify-between">
                           <h3 className="text-lg font-bold flex items-center gap-2">
-                            <FileText className="w-5 h-5 text-indigo-600" />
-                            Revisão do Roteiro
+                            <FileText className="w-5 h-5 text-signal" />
+                            Revisar roteiro
                           </h3>
                           <button 
                             onClick={() => setCurrentStep('idle')}
                             disabled={isGenerating}
-                            className="text-sm text-neutral-500 hover:text-neutral-700 flex items-center gap-1"
+                            className="text-sm text-mist hover:text-foam/85 flex items-center gap-1"
                           >
                             <ArrowLeft className="w-4 h-4" /> Voltar
                           </button>
                         </div>
                         
-                        <p className="text-sm text-neutral-500">
-                          Revise e edite o roteiro gerado pela IA antes de enviá-lo para a geração de áudio.
+                        <p className="text-sm text-mist">
+                          Edite o texto antes de escolher como gerar a voz.
                         </p>
 
                         <textarea
                           value={editableScript}
                           onChange={(e) => setEditableScript(e.target.value)}
-                          className="w-full h-64 px-4 py-3 rounded-xl border border-neutral-300 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-shadow resize-none text-sm leading-relaxed"
+                          className="input-field h-64 resize-none leading-relaxed"
                           disabled={isGenerating}
                         />
 
-                        <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-4 space-y-3">
+                        <div className="rounded-xl border border-signal/20 bg-signal/5 p-4 text-xs text-foam space-y-1">
+                          <p className="font-medium text-sm">Como funciona</p>
+                          <p>
+                            <strong>HeyGen</strong> — avatar e narração com a <strong>voz do personagem</strong> escolhido.
+                          </p>
+                          <p>
+                            <strong>ElevenLabs</strong> (opcional) — só o ficheiro de áudio; o avatar continua no HeyGen.
+                          </p>
+                        </div>
+
+                        <div className="panel-soft p-4 space-y-3">
+                          <label className="text-sm font-medium text-foam">Fonte da voz</label>
+                          <div className="flex flex-col sm:flex-row gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setAudioSourceMode('heygen')}
+                              disabled={isGenerating}
+                              className={`flex-1 px-4 py-3 rounded-lg text-sm font-medium border transition-colors ${
+                                audioSourceMode === 'heygen'
+                                  ? 'bg-signal text-signal-ink border-signal'
+                                  : 'bg-panel text-foam/85 border-line hover:bg-ink-2'
+                              }`}
+                            >
+                              Voz do avatar (HeyGen)
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setAudioSourceMode('elevenlabs')}
+                              disabled={isGenerating}
+                              className={`flex-1 px-4 py-3 rounded-lg text-sm font-medium border transition-colors ${
+                                audioSourceMode === 'elevenlabs'
+                                  ? 'bg-signal text-signal-ink border-signal'
+                                  : 'bg-panel text-foam/85 border-line hover:bg-ink-2'
+                              }`}
+                            >
+                              ElevenLabs
+                            </button>
+                          </div>
+                          <p className="text-xs text-mist">
+                            {audioSourceMode === 'heygen'
+                              ? 'A narração usa a voz padrão do avatar. Sem ElevenLabs.'
+                              : 'Gera áudio com ElevenLabs (ou envie um ficheiro de teste) antes do vídeo.'}
+                          </p>
+                        </div>
+
+                        {audioSourceMode === 'elevenlabs' ? (
+                        <div className="panel-soft p-4 space-y-3">
                           <div className="flex items-center justify-between gap-2 flex-wrap">
-                            <label className="text-sm font-medium text-neutral-800 flex items-center gap-2">
-                              <Mic className="w-4 h-4 text-indigo-600" />
-                              Voz da narração (ElevenLabs)
+                            <label className="text-sm font-medium text-foam flex items-center gap-2">
+                              <Mic className="w-4 h-4 text-signal" />
+                              Voz ElevenLabs
                             </label>
                             <button
                               type="button"
                               onClick={() => setActiveTab('settings')}
-                              className="text-xs text-indigo-600 hover:text-indigo-700 font-medium"
+                              className="text-xs text-signal hover:text-signal-dim font-medium"
                             >
                               API key e voz avançada →
                             </button>
                           </div>
                           {!apiKeys.elevenlabs ? (
-                            <p className="text-sm text-amber-800">
-                              Cadastre a chave ElevenLabs em Configurações para gerar áudio.
+                            <p className="text-sm text-warn">
+                              Adicione a chave ElevenLabs em Config para gerar áudio.
                             </p>
                           ) : (
                             <>
                               <div className="space-y-2">
-                                <label className="text-xs font-medium text-neutral-600">
+                                <label className="text-xs font-medium text-mist">
                                   Voice ID (obrigatório)
                                 </label>
                                 <input
@@ -1279,26 +1364,26 @@ export default function Home() {
                                   onChange={(e) => updateApiKey('elevenlabsVoiceId', e.target.value)}
                                   placeholder="My Voices no site ElevenLabs → copie o voice_id"
                                   disabled={isGenerating}
-                                  className="w-full px-3 py-2.5 rounded-lg border border-neutral-300 bg-white text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                                  className="input-field bg-panel text-sm focus:ring-2 focus:ring-signal/25 focus:border-signal/50 outline-none"
                                 />
-                                <p className="text-xs text-neutral-500">
+                                <p className="text-xs text-mist">
                                   No plano gratuito, a API não aceita vozes da Voice Library. Use um ID de voz da sua
-                                  conta. A permissão <code className="text-neutral-700">text_to_speech</code> gera o
-                                  áudio; <code className="text-neutral-700">voices_read</code> só preenche a lista
+                                  conta. A permissão <code className="text-foam/85">text_to_speech</code> gera o
+                                  áudio; <code className="text-foam/85">voices_read</code> só preenche a lista
                                   abaixo.
                                 </p>
                                 <a
                                   href="https://elevenlabs.io/docs/api-reference/service-accounts/api-keys/create"
                                   target="_blank"
                                   rel="noreferrer"
-                                  className="text-xs text-indigo-600 hover:text-indigo-700 inline-block"
+                                  className="text-xs text-signal hover:text-signal-dim inline-block"
                                 >
                                   Documentação: permissões de API key →
                                 </a>
                               </div>
 
                               {elevenLabsVoicesLoading ? (
-                                <div className="flex items-center gap-2 text-sm text-neutral-600 pt-2">
+                                <div className="flex items-center gap-2 text-sm text-mist pt-2">
                                   <Loader2 className="w-4 h-4 animate-spin" />
                                   Tentando carregar lista de vozes…
                                 </div>
@@ -1308,8 +1393,8 @@ export default function Home() {
                                 <div
                                   className={`rounded-lg p-3 text-sm ${
                                     elevenLabsMissingVoicesRead
-                                      ? 'bg-amber-50 border border-amber-200 text-amber-900'
-                                      : 'bg-red-50 border border-red-100 text-red-800'
+                                      ? 'bg-warn/10 border border-warn/30 text-warn'
+                                      : 'bg-warm/10 border border-warm/30 text-warm'
                                   }`}
                                 >
                                   {elevenLabsVoicesError}
@@ -1318,14 +1403,14 @@ export default function Home() {
 
                               {!elevenLabsVoicesLoading && elevenLabsVoices.length > 0 ? (
                                 <div className="space-y-2 pt-1">
-                                  <label className="text-xs font-medium text-neutral-600">
+                                  <label className="text-xs font-medium text-mist">
                                     Ou escolha na lista (requer voices_read na chave)
                                   </label>
                                   <select
                                     value={elevenLabsVoiceSelectValue}
                                     onChange={(e) => handleElevenLabsVoiceSelect(e.target.value)}
                                     disabled={isGenerating}
-                                    className="w-full px-3 py-2.5 rounded-lg border border-neutral-300 bg-white text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                                    className="input-field bg-panel text-sm focus:ring-2 focus:ring-signal/25 focus:border-signal/50 outline-none"
                                   >
                                     <option value="__pick__">Escolher da lista (preenche o Voice ID)</option>
                                     {elevenLabsVoices.map((v) => (
@@ -1339,15 +1424,52 @@ export default function Home() {
                             </>
                           )}
                         </div>
-
-                        <div className="rounded-xl border border-dashed border-amber-300 bg-amber-50/80 p-4 space-y-3">
-                          <div className="flex items-center gap-2 text-sm font-medium text-amber-900">
-                            <Upload className="w-4 h-4 shrink-0" />
-                            Modo teste — enviar áudio (sem ElevenLabs)
+                        ) : (
+                        <div className="rounded-xl border border-line bg-signal/5 p-4 space-y-3">
+                          <div className="flex items-center justify-between gap-2 flex-wrap">
+                            <label className="text-sm font-medium text-foam flex items-center gap-2">
+                              <Video className="w-4 h-4 text-signal" />
+                              Voz do avatar
+                            </label>
+                            <button
+                              type="button"
+                              onClick={() => setActiveTab('settings')}
+                              className="text-xs text-signal hover:text-signal-dim font-medium"
+                            >
+                              API key e personagem →
+                            </button>
                           </div>
-                          <p className="text-xs text-amber-800/90">
-                            Use um MP3, WAV, M4A, WebM ou OGG gravado por você. O roteiro atual é salvo no projeto; o
-                            custo de áudio fica zerado para esta etapa.
+                          {!apiKeys.heygen ? (
+                            <p className="text-sm text-warn">
+                              Adicione a chave HeyGen em Config.
+                            </p>
+                          ) : !apiKeys.heygenCharacterId?.trim() ? (
+                            <p className="text-sm text-warn">
+                              Escolha um avatar em Config. A voz será a padrão desse personagem.
+                            </p>
+                          ) : (
+                            <p className="text-sm text-foam/85">
+                              O texto será lido pela voz do avatar{' '}
+                              <code className="text-xs bg-panel/80 px-1.5 py-0.5 rounded border border-line">
+                                {apiKeys.heygenCharacterId}
+                              </code>
+                              {apiKeys.heygenEngine === 'avatar_v'
+                                ? ' com motor Avatar V'
+                                : ' com motor Avatar IV'}
+                              . Não precisa de Voice ID.
+                            </p>
+                          )}
+                        </div>
+                        )}
+
+                        {audioSourceMode === 'elevenlabs' ? (
+                        <div className="rounded-xl border border-dashed border-warn/40 bg-warn/10 p-4 space-y-3">
+                          <div className="flex items-center gap-2 text-sm font-medium text-warn">
+                            <Upload className="w-4 h-4 shrink-0" />
+                            Teste — enviar áudio
+                          </div>
+                          <p className="text-xs text-warn/90">
+                            MP3, WAV, M4A, WebM ou OGG. O roteiro é guardado; o custo de áudio fica a zero nesta etapa.
                           </p>
                           <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
                             <input
@@ -1355,14 +1477,14 @@ export default function Home() {
                               type="file"
                               accept="audio/*,.mp3,.wav,.m4a,.webm,.ogg"
                               disabled={isGenerating}
-                              className="text-sm text-neutral-700 file:mr-3 file:rounded-lg file:border-0 file:bg-amber-200 file:px-3 file:py-2 file:text-sm file:font-medium file:text-amber-900 hover:file:bg-amber-300"
+                              className="text-sm text-foam/85 file:mr-3 file:rounded-lg file:border-0 file:bg-warn/30 file:px-3 file:py-2 file:text-sm file:font-medium file:text-warn hover:file:bg-warn/40"
                               onChange={(e) => setPendingTestAudio(e.target.files?.[0] ?? null)}
                             />
                             <button
                               type="button"
                               onClick={handleUploadTestAudio}
                               disabled={isGenerating || !pendingTestAudio || !editableScript}
-                              className="sm:ml-auto py-2.5 px-4 rounded-lg bg-amber-700 hover:bg-amber-800 disabled:bg-neutral-300 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors flex items-center justify-center gap-2"
+                              className="sm:ml-auto py-2.5 px-4 rounded-lg bg-warm hover:bg-warm/90 text-foam disabled:bg-line disabled:text-mist disabled:cursor-not-allowed text-sm font-medium transition-colors flex items-center justify-center gap-2"
                             >
                               {isUploadingTestAudio ? (
                                 <>
@@ -1372,13 +1494,30 @@ export default function Home() {
                               ) : (
                                 <>
                                   <Upload className="w-4 h-4" />
-                                  Usar arquivo como áudio
+                                  Usar este áudio
                                 </>
                               )}
                             </button>
                           </div>
                         </div>
+                        ) : null}
 
+                        {audioSourceMode === 'heygen' ? (
+                        <button
+                          type="button"
+                          onClick={handleApproveWithHeygenVoice}
+                          disabled={
+                            isGenerating ||
+                            !editableScript ||
+                            !apiKeys.heygen ||
+                            !apiKeys.heygenCharacterId?.trim()
+                          }
+                          className="btn-primary w-full py-4"
+                        >
+                          <Check className="w-5 h-5" />
+                          Aprovar e continuar
+                        </button>
+                        ) : (
                         <button
                           onClick={handleGenerateAudio}
                           disabled={
@@ -1387,7 +1526,7 @@ export default function Home() {
                             !apiKeys.elevenlabs ||
                             !apiKeys.elevenlabsVoiceId?.trim()
                           }
-                          className="w-full py-4 bg-indigo-600 hover:bg-indigo-700 disabled:bg-neutral-300 disabled:cursor-not-allowed text-white rounded-xl font-medium transition-colors flex items-center justify-center gap-2 shadow-sm"
+                          className="btn-primary w-full py-4"
                         >
                           {isGenerating ? (
                             <>
@@ -1397,10 +1536,11 @@ export default function Home() {
                           ) : (
                             <>
                               <Check className="w-5 h-5" />
-                              Aprovar Roteiro e Gerar Áudio
+                              Aprovar e gerar áudio
                             </>
                           )}
                         </button>
+                        )}
                       </motion.div>
                     )}
 
@@ -1409,45 +1549,52 @@ export default function Home() {
                       <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
                         <div className="flex items-center justify-between">
                           <h3 className="text-lg font-bold flex items-center gap-2">
-                            <Mic className="w-5 h-5 text-indigo-600" />
+                            <Mic className="w-5 h-5 text-signal" />
                             Revisão do Áudio
                           </h3>
                           <button 
                             onClick={() => navigateWorkflowStep('script_review')}
                             disabled={isGenerating}
-                            className="text-sm text-neutral-500 hover:text-neutral-700 flex items-center gap-1"
+                            className="text-sm text-mist hover:text-foam/85 flex items-center gap-1"
                           >
                             <ArrowLeft className="w-4 h-4" /> Voltar ao Roteiro
                           </button>
                         </div>
                         
-                        <p className="text-sm text-neutral-500">
-                          Ouça o áudio gerado. Se estiver satisfeito, prossiga para a geração do vídeo final.
+                        <p className="text-sm text-mist">
+                          {project?.audioSource === 'heygen'
+                            ? 'A narração será gerada pelo HeyGen junto com o vídeo. Revise o roteiro e as notas abaixo antes de renderizar.'
+                            : 'Ouça o áudio gerado. Se estiver satisfeito, prossiga para a geração do vídeo final.'}
                         </p>
 
-                        <div className="bg-neutral-50 p-6 rounded-xl border border-neutral-200 flex flex-col items-center gap-4">
-                          {project?.audioUrl ? (
+                        <div className="bg-ink-2 p-6 rounded-xl border border-line flex flex-col items-center gap-4">
+                          {project?.audioSource === 'heygen' ? (
+                            <div className="text-sm text-foam bg-signal/5 border border-signal/20 rounded-lg p-4 w-full text-center">
+                              <p className="font-medium">Áudio via HeyGen</p>
+                              <p className="text-xs text-mist mt-1">
+                                Sem pré-escuta — o HeyGen sintetiza a voz a partir do roteiro ao criar o vídeo.
+                              </p>
+                            </div>
+                          ) : project?.audioUrl ? (
                             <audio controls src={project.audioUrl} className="w-full" />
                           ) : (
-                            <div className="text-neutral-400 flex items-center gap-2">
+                            <div className="text-mist/70 flex items-center gap-2">
                               <AlertCircle className="w-5 h-5" /> Áudio indisponível
                             </div>
                           )}
                         </div>
 
                         <div className="space-y-2">
-                          <label className="flex items-center gap-2 text-sm font-medium text-neutral-700">
+                          <label className="flex items-center gap-2 text-sm font-medium text-foam/85">
                             <Settings className="w-4 h-4" />
                             Informações adicionais para o vídeo (opcional)
                           </label>
-                          <p className="text-xs text-neutral-500">
-                            Contexto livre (aparece no título do vídeo no HeyGen). Comandos de fundo podem ir na mesma
-                            caixa, separados por vírgula, ponto e vírgula ou linha — se houver vários, vale o último
-                            fundo indicado:{' '}
-                            <code className="mx-1 text-neutral-700">bg_color:#0f172a</code>,
-                            <code className="mx-1 text-neutral-700">bg_image:https://...</code> ou{' '}
-                            <code className="mx-1 text-neutral-700">bg_video:https://...</code>. O personagem é o das
-                            Configurações.
+                          <p className="text-xs text-mist">
+                            Contexto livre (entra no título do vídeo no HeyGen). Comandos de fundo na mesma caixa,
+                            separados por vírgula, ponto e vírgula ou linha — vale o último fundo:{' '}
+                            <code className="mx-1 text-foam/85">bg_color:#0f172a</code>,
+                            <code className="mx-1 text-foam/85">bg_image:https://...</code> ou{' '}
+                            <code className="mx-1 text-foam/85">bg_video:https://...</code>. O personagem é o de Config.
                           </p>
                           <textarea
                             value={videoPromptInfo}
@@ -1455,18 +1602,19 @@ export default function Home() {
                             placeholder="Ex.: bg_image:https://.../studio.jpg  ou  bg_color:#111827"
                             rows={3}
                             disabled={isGenerating}
-                            className="w-full px-4 py-3 rounded-xl border border-neutral-300 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-shadow resize-y text-sm"
+                            className="input-field focus:ring-2 focus:ring-signal/25 focus:border-signal/50 outline-none transition-shadow resize-y text-sm"
                           />
                         </div>
 
-                        <p className="text-xs text-neutral-500">
-                          O HeyGen gera o vídeo com o seu áudio e o personagem escolhido em Configurações. O render pode
-                          levar vários minutos; mantenha esta página aberta até concluir.
+                        <p className="text-xs text-mist">
+                          {project?.audioSource === 'heygen'
+                            ? 'O HeyGen gera narração e vídeo num passo com o personagem de Config. O render pode levar vários minutos.'
+                            : 'O HeyGen gera o vídeo com o seu áudio e o personagem de Config. O render pode levar vários minutos — mantenha esta página aberta.'}
                         </p>
                         <button
                           onClick={handleGenerateVideo}
                           disabled={isGenerating}
-                          className="w-full py-4 bg-indigo-600 hover:bg-indigo-700 disabled:bg-neutral-300 disabled:cursor-not-allowed text-white rounded-xl font-medium transition-colors flex items-center justify-center gap-2 shadow-sm"
+                          className="btn-primary w-full py-4"
                         >
                           {isGenerating ? (
                             <>
@@ -1487,17 +1635,17 @@ export default function Home() {
                     {currentStep === 'completed' && (
                       <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6 py-6">
                         <div className="text-center">
-                          <div className="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-4">
+                          <div className="w-16 h-16 bg-ok/15 text-ok rounded-full flex items-center justify-center mx-auto mb-4">
                             <CheckCircle2 className="w-8 h-8" />
                           </div>
                           <h3 className="text-2xl font-bold">
                             {project?.videoIsDemo ? 'Etapa concluída (demonstração)' : 'Vídeo concluído!'}
                           </h3>
-                          <p className="text-neutral-500 mt-2 max-w-lg mx-auto">
+                          <p className="text-mist mt-2 max-w-lg mx-auto">
                             {project?.videoIsDemo ? (
                               <>
                                 Ainda não há integração real com HeyGen/Kling: o player abaixo mostra apenas um{' '}
-                                <strong className="text-neutral-700">vídeo de amostra</strong> para testar o fluxo. O seu
+                                <strong className="text-foam/85">vídeo de amostra</strong> para testar o fluxo. O seu
                                 áudio e roteiro continuam guardados no projeto.
                               </>
                             ) : (
@@ -1507,14 +1655,14 @@ export default function Home() {
                         </div>
 
                         {project?.videoUrl ? (
-                          <div className="rounded-2xl overflow-hidden border border-neutral-200 bg-black shadow-lg">
+                          <div className="rounded-2xl overflow-hidden border border-line bg-black ">
                             <video
                               src={project.videoUrl}
                               controls
                               playsInline
                               className="w-full aspect-video object-contain bg-black"
                             />
-                            <div className="px-4 py-3 bg-neutral-900 text-white flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                            <div className="px-4 py-3 bg-ink text-foam flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                               <span className="text-sm">
                                 {project.videoIsDemo ? 'Amostra (Big Buck Bunny)' : 'Pré-visualização'}
                               </span>
@@ -1522,7 +1670,7 @@ export default function Home() {
                                 href={project.videoUrl}
                                 target="_blank"
                                 rel="noreferrer"
-                                className="text-sm text-indigo-400 hover:text-indigo-300"
+                                className="text-sm text-signal hover:text-signal"
                               >
                                 Abrir / baixar ficheiro →
                               </a>
@@ -1533,7 +1681,7 @@ export default function Home() {
                         <div className="text-center">
                           <button
                             onClick={handleReset}
-                            className="mt-2 px-8 py-3 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 rounded-xl font-medium transition-colors inline-flex items-center gap-2"
+                            className="mt-2 px-8 py-3 bg-panel-2 hover:bg-line text-foam/85 rounded-xl font-medium transition-colors inline-flex items-center gap-2"
                           >
                             <Play className="w-4 h-4" />
                             Criar novo vídeo
@@ -1547,23 +1695,27 @@ export default function Home() {
                   {/* Status & Output Sidebar */}
                   <div className="space-y-6">
                     {/* Workflow Status */}
-                    <div className="bg-white p-6 rounded-2xl border border-neutral-200 shadow-sm">
-                      <h3 className="text-sm font-bold uppercase tracking-wider text-neutral-500 mb-4">Status do Fluxo</h3>
+                    <div className="panel p-6 ">
+                      <h3 className="text-sm font-bold uppercase tracking-wider text-mist mb-4">Etapas</h3>
                       <div className="space-y-4">
                         <StatusItem 
                           icon={<Sparkles className="w-4 h-4" />} 
-                          label="Roteirização (Gemini IA)" 
+                          label="Roteiro"
                           status={currentStep === 'idle' ? 'pending' : currentStep === 'generating_script' ? 'loading' : 'success'}
                           onClick={() => navigateWorkflowStep('script_review')}
                         />
-                        <div className="w-0.5 h-4 bg-neutral-200 ml-4"></div>
+                        <div className="w-0.5 h-4 bg-line ml-4"></div>
                         <StatusItem 
                           icon={<Mic className="w-4 h-4" />} 
-                          label="Geração de Áudio (ElevenLabs)" 
-                          status={['idle', 'generating_script', 'script_review'].includes(currentStep) ? 'pending' : currentStep === 'generating_audio' ? 'loading' : currentStep === 'error' && !project?.audioUrl ? 'pending' : currentStep === 'error' && project?.status === 'generating_audio' ? 'error' : 'success'}
+                          label={
+                            project?.audioSource === 'heygen'
+                              ? 'Narração (HeyGen)'
+                              : 'Áudio (ElevenLabs)'
+                          }
+                          status={['idle', 'generating_script', 'script_review'].includes(currentStep) ? 'pending' : currentStep === 'generating_audio' ? 'loading' : currentStep === 'error' && !project?.audioUrl && project?.audioSource !== 'heygen' ? 'pending' : currentStep === 'error' && project?.status === 'generating_audio' ? 'error' : 'success'}
                           onClick={() => navigateWorkflowStep('audio_review')}
                         />
-                        <div className="w-0.5 h-4 bg-neutral-200 ml-4"></div>
+                        <div className="w-0.5 h-4 bg-line ml-4"></div>
                         <StatusItem 
                           icon={<Video className="w-4 h-4" />} 
                           label="Vídeo (HeyGen)" 
@@ -1578,13 +1730,13 @@ export default function Home() {
                       <motion.div 
                         initial={{ opacity: 0, scale: 0.95 }}
                         animate={{ opacity: 1, scale: 1 }}
-                        className="bg-white border border-neutral-200 p-6 rounded-2xl shadow-sm"
+                        className="bg-panel border border-line p-6 rounded-2xl "
                       >
-                        <h3 className="text-sm font-bold uppercase tracking-wider text-neutral-500 mb-4 flex items-center gap-2">
+                        <h3 className="text-sm font-bold uppercase tracking-wider text-mist mb-4 flex items-center gap-2">
                           <FileText className="w-4 h-4" />
                           Roteiro Aprovado
                         </h3>
-                        <div className="text-sm text-neutral-700 bg-neutral-50 p-4 rounded-xl border border-neutral-100 max-h-48 overflow-y-auto whitespace-pre-wrap">
+                        <div className="text-sm text-foam/85 bg-ink-2 p-4 rounded-xl border border-line-soft max-h-48 overflow-y-auto whitespace-pre-wrap">
                           {project.generatedScript}
                         </div>
                       </motion.div>
@@ -1595,22 +1747,22 @@ export default function Home() {
                       <motion.div 
                         initial={{ opacity: 0, scale: 0.95 }}
                         animate={{ opacity: 1, scale: 1 }}
-                        className="bg-emerald-50 border border-emerald-200 p-6 rounded-2xl shadow-sm"
+                        className="bg-ok/10 border border-ok/30 p-6 rounded-2xl "
                       >
-                        <h3 className="text-sm font-bold uppercase tracking-wider text-emerald-800 mb-4 flex items-center gap-2">
+                        <h3 className="text-sm font-bold uppercase tracking-wider text-ok mb-4 flex items-center gap-2">
                           <DollarSign className="w-4 h-4" />
                           Custo Estimado
                         </h3>
                         <div className="space-y-3 text-sm">
-                          <div className="flex justify-between text-emerald-700">
+                          <div className="flex justify-between text-ok">
                             <span>Áudio ({project.cost.audioTokens} chars)</span>
                             <span className="font-medium">${project.cost.audioCost.toFixed(4)}</span>
                           </div>
-                          <div className="flex justify-between text-emerald-700">
+                          <div className="flex justify-between text-ok">
                             <span>Vídeo (~{project.cost.videoSeconds}s)</span>
                             <span className="font-medium">${project.cost.videoCost.toFixed(4)}</span>
                           </div>
-                          <div className="pt-3 border-t border-emerald-200 flex justify-between text-emerald-900 font-bold">
+                          <div className="pt-3 border-t border-ok/30 flex justify-between text-ok font-bold">
                             <span>Custo Total</span>
                             <span>${project.cost.totalCost.toFixed(4)}</span>
                           </div>
@@ -1625,18 +1777,18 @@ export default function Home() {
                       <motion.div 
                         initial={{ opacity: 0, scale: 0.95 }}
                         animate={{ opacity: 1, scale: 1 }}
-                        className="bg-black rounded-2xl overflow-hidden shadow-lg border border-neutral-800"
+                        className="bg-black rounded-2xl overflow-hidden  border border-line"
                       >
                         <video 
                           src={project.videoUrl} 
                           controls 
                           className="w-full aspect-video object-cover"
                         />
-                        <div className="p-4 bg-neutral-900 text-white">
+                        <div className="p-4 bg-ink text-foam">
                           <p className="text-sm font-medium">
                             {project.videoIsDemo ? 'Vídeo de demonstração' : 'Vídeo gerado'}
                           </p>
-                          <a href={project.videoUrl} download className="text-xs text-indigo-400 hover:text-indigo-300 mt-1 inline-block">
+                          <a href={project.videoUrl} download className="text-xs text-signal hover:text-signal mt-1 inline-block">
                             Abrir / baixar
                           </a>
                         </div>
@@ -1645,6 +1797,8 @@ export default function Home() {
                   </div>
                 </div>
               </motion.div>
+            ) : activeTab === 'translation' ? (
+              <VideoTranslationTab user={user} />
             ) : activeTab === 'settings' ? (
               <motion.div
                 key="settings"
@@ -1654,174 +1808,134 @@ export default function Home() {
                 className="max-w-2xl space-y-8"
               >
                 <div>
-                  <h2 className="text-2xl font-bold tracking-tight">Configurações de API</h2>
-                  <p className="text-neutral-500 mt-1">Cadastre suas chaves de API para habilitar roteiro, áudio e vídeo. As chaves são salvas no Firebase para o seu usuário.</p>
+                  <h2 className="font-display text-3xl font-bold tracking-tight">Config</h2>
+                  <p className="text-mist mt-1">API keys e personagem do avatar — guardados na sua conta.</p>
                 </div>
 
-                <div className="space-y-6 bg-white p-8 rounded-2xl border border-neutral-200 shadow-sm">
+                <div className="rounded-2xl border border-signal/30 bg-signal/10 p-5 sm:p-6">
+                  <div className="flex gap-4">
+                    <span className="mt-0.5 flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-signal/20 ring-1 ring-signal/30">
+                      <DollarSign className="h-5 w-5 text-signal" />
+                    </span>
+                    <div>
+                      <p className="font-display text-lg font-bold text-foam">
+                        Você traz as APIs. O Studio corta o custo.
+                      </p>
+                      <p className="mt-2 text-sm leading-relaxed text-foam/85">
+                        O trabalho é seu: criar e colar as chaves (HeyGen, ElevenLabs, Gemini/OpenAI). Em troca,
+                        paga só o consumo direto das APIs — em média{' '}
+                        <strong className="text-signal">até 60% mais barato</strong> do que produzir o mesmo
+                        vídeo nas interfaces e planos do HeyGen e ferramentas similares.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-6 panel p-8 ">
                   {isKeysLoading && (
-                    <div className="p-4 bg-neutral-50 border border-neutral-200 rounded-xl text-sm text-neutral-600 flex items-center gap-2">
+                    <div className="p-4 bg-ink-2 border border-line rounded-xl text-sm text-mist flex items-center gap-2">
                       <Loader2 className="w-4 h-4 animate-spin" />
                       Carregando chaves salvas...
                     </div>
                   )}
                   <div className="space-y-4">
                     <h3 className="text-lg font-semibold flex items-center gap-2">
-                      <Sparkles className="w-5 h-5 text-indigo-600" />
-                      Geração de Roteiro (IA)
+                      <Sparkles className="w-5 h-5 text-signal" />
+                      Roteiro (IA)
                     </h3>
                     <div className="space-y-2">
                       <div className="flex items-center justify-between">
-                        <label className="text-sm font-medium text-neutral-700">Gemini API Key</label>
+                        <label className="text-sm font-medium text-foam/85">Gemini API Key</label>
                         <button
                           type="button"
                           onClick={() => setHelpModalKey('gemini')}
-                          className="text-xs text-indigo-600 hover:text-indigo-700 inline-flex items-center gap-1"
+                          className="text-xs text-signal hover:text-signal-dim inline-flex items-center gap-1"
                         >
                           <HelpCircle className="w-3.5 h-3.5" />
                           Como obter
                         </button>
                       </div>
                       <div className="relative">
-                        <Key className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400" />
+                        <Key className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-mist/70" />
                         <input
                           type="password"
                           value={apiKeys.gemini}
                           onChange={(e) => updateApiKey('gemini', e.target.value)}
                           placeholder="AIza..."
-                          className="w-full pl-10 pr-4 py-3 rounded-xl border border-neutral-300 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-shadow text-sm"
+                          className="input-field pl-10 focus:ring-2 focus:ring-signal/25 focus:border-signal/50 outline-none transition-shadow text-sm"
                           disabled={isKeysLoading}
                         />
                       </div>
                     </div>
                     <div className="space-y-2">
                       <div className="flex items-center justify-between">
-                        <label className="text-sm font-medium text-neutral-700">GPT/OpenAI API Key (opcional, fallback)</label>
+                        <label className="text-sm font-medium text-foam/85">GPT/OpenAI API Key (opcional, fallback)</label>
                         <button
                           type="button"
                           onClick={() => setHelpModalKey('openai')}
-                          className="text-xs text-indigo-600 hover:text-indigo-700 inline-flex items-center gap-1"
+                          className="text-xs text-signal hover:text-signal-dim inline-flex items-center gap-1"
                         >
                           <HelpCircle className="w-3.5 h-3.5" />
                           Como obter
                         </button>
                       </div>
                       <div className="relative">
-                        <Key className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400" />
+                        <Key className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-mist/70" />
                         <input
                           type="password"
                           value={apiKeys.openai}
                           onChange={(e) => updateApiKey('openai', e.target.value)}
                           placeholder="sk-..."
-                          className="w-full pl-10 pr-4 py-3 rounded-xl border border-neutral-300 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-shadow text-sm"
+                          className="input-field pl-10 focus:ring-2 focus:ring-signal/25 focus:border-signal/50 outline-none transition-shadow text-sm"
                           disabled={isKeysLoading}
                         />
                       </div>
-                      <p className="text-xs text-neutral-500">Se Gemini estiver preenchido, ele será priorizado.</p>
+                      <p className="text-xs text-mist">Se Gemini estiver preenchido, ele será priorizado.</p>
                     </div>
                   </div>
 
-                  <div className="w-full h-px bg-neutral-100 my-6"></div>
+                  <div className="w-full h-px bg-panel-2 my-6"></div>
 
                   <div className="space-y-4">
                     <h3 className="text-lg font-semibold flex items-center gap-2">
-                      <Mic className="w-5 h-5 text-indigo-600" />
-                      Geração de Áudio
+                      <Video className="w-5 h-5 text-signal" />
+                      HeyGen — avatar e voz
                     </h3>
+                    <p className="text-xs text-mist -mt-2">
+                      Avatar e narração no fluxo padrão vêm do HeyGen. Escolha Avatar IV ou Avatar V abaixo.
+                    </p>
                     <div className="space-y-2">
                       <div className="flex items-center justify-between">
-                        <label className="text-sm font-medium text-neutral-700">ElevenLabs API Key</label>
-                        <button
-                          type="button"
-                          onClick={() => setHelpModalKey('elevenlabs')}
-                          className="text-xs text-indigo-600 hover:text-indigo-700 inline-flex items-center gap-1"
-                        >
-                          <HelpCircle className="w-3.5 h-3.5" />
-                          Como obter
-                        </button>
-                      </div>
-                      <div className="relative">
-                        <Key className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400" />
-                        <input
-                          type="password"
-                          value={apiKeys.elevenlabs}
-                          onChange={(e) => updateApiKey('elevenlabs', e.target.value)}
-                          placeholder="sk_..."
-                          className="w-full pl-10 pr-4 py-3 rounded-xl border border-neutral-300 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-shadow text-sm"
-                          disabled={isKeysLoading}
-                        />
-                      </div>
-                    </div>
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between">
-                        <label className="text-sm font-medium text-neutral-700">ElevenLabs Voice ID</label>
-                        <button
-                          type="button"
-                          onClick={() => setHelpModalKey('elevenlabsVoiceId')}
-                          className="text-xs text-indigo-600 hover:text-indigo-700 inline-flex items-center gap-1"
-                        >
-                          <HelpCircle className="w-3.5 h-3.5" />
-                          Como obter
-                        </button>
-                      </div>
-                      <div className="relative">
-                        <Key className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400" />
-                        <input
-                          type="text"
-                          value={apiKeys.elevenlabsVoiceId}
-                          onChange={(e) => updateApiKey('elevenlabsVoiceId', e.target.value)}
-                          placeholder="My Voices → copie o voice_id"
-                          className="w-full pl-10 pr-4 py-3 rounded-xl border border-neutral-300 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-shadow text-sm"
-                          disabled={isKeysLoading}
-                        />
-                      </div>
-                      <p className="text-xs text-neutral-500">
-                        Obrigatório para gerar áudio. Plano free: use voz da sua conta, não da Voice Library. Em servidor
-                        próprio, <code className="text-neutral-700">ELEVENLABS_DEFAULT_VOICE_ID</code> pode substituir
-                        se configurado.
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="w-full h-px bg-neutral-100 my-6"></div>
-
-                  <div className="space-y-4">
-                    <h3 className="text-lg font-semibold flex items-center gap-2">
-                      <Video className="w-5 h-5 text-indigo-600" />
-                      Geração de Vídeo / Avatares
-                    </h3>
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between">
-                        <label className="text-sm font-medium text-neutral-700">HeyGen API Key</label>
+                        <label className="text-sm font-medium text-foam/85">HeyGen API Key</label>
                         <button
                           type="button"
                           onClick={() => setHelpModalKey('heygen')}
-                          className="text-xs text-indigo-600 hover:text-indigo-700 inline-flex items-center gap-1"
+                          className="text-xs text-signal hover:text-signal-dim inline-flex items-center gap-1"
                         >
                           <HelpCircle className="w-3.5 h-3.5" />
                           Como obter
                         </button>
                       </div>
                       <div className="relative">
-                        <Key className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400" />
+                        <Key className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-mist/70" />
                         <input
                           type="password"
                           value={apiKeys.heygen}
                           onChange={(e) => updateApiKey('heygen', e.target.value)}
                           placeholder="Insira sua chave do HeyGen..."
-                          className="w-full pl-10 pr-4 py-3 rounded-xl border border-neutral-300 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-shadow text-sm"
+                          className="input-field pl-10 focus:ring-2 focus:ring-signal/25 focus:border-signal/50 outline-none transition-shadow text-sm"
                           disabled={isKeysLoading}
                         />
                       </div>
                     </div>
                     <div className="space-y-2">
                       <div className="flex flex-wrap items-center justify-between gap-2">
-                        <label className="text-sm font-medium text-neutral-700">Personagem HeyGen</label>
+                        <label className="text-sm font-medium text-foam/85">Personagem HeyGen</label>
                         <button
                           type="button"
                           onClick={() => void loadHeygenCharacters()}
                           disabled={isKeysLoading || heygenListLoading || !apiKeys.heygen?.trim()}
-                          className="text-xs text-indigo-600 hover:text-indigo-700 font-medium disabled:opacity-50"
+                          className="text-xs text-signal hover:text-signal-dim font-medium disabled:opacity-50"
                         >
                           {heygenListLoading ? 'A carregar…' : 'Carregar lista da API'}
                         </button>
@@ -1830,7 +1944,7 @@ export default function Home() {
                         value={heygenPickSelectValue}
                         onChange={(e) => applyHeygenCharacterPick(e.target.value)}
                         disabled={isKeysLoading || heygenAvatars.length === 0}
-                        className="w-full px-4 py-3 rounded-xl border border-neutral-300 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-shadow text-sm bg-white"
+                        className="input-field focus:ring-2 focus:ring-signal/25 focus:border-signal/50 outline-none transition-shadow text-sm bg-panel"
                       >
                         <option value="">
                           {heygenAvatars.length === 0
@@ -1848,58 +1962,171 @@ export default function Home() {
                         ) : null}
                       </select>
                       {heygenListError ? (
-                        <p className="text-xs text-red-700">{heygenListError}</p>
+                        <p className="text-xs text-warm">{heygenListError}</p>
                       ) : null}
                       <div className="flex items-center justify-between">
-                        <label className="text-sm font-medium text-neutral-700">ID do personagem</label>
+                        <label className="text-sm font-medium text-foam/85">ID do personagem (avatar)</label>
                         <button
                           type="button"
                           onClick={() => setHelpModalKey('heygenCharacterId')}
-                          className="text-xs text-indigo-600 hover:text-indigo-700 inline-flex items-center gap-1"
+                          className="text-xs text-signal hover:text-signal-dim inline-flex items-center gap-1"
                         >
                           <HelpCircle className="w-3.5 h-3.5" />
                           Como obter
                         </button>
                       </div>
                       <div className="relative">
-                        <Key className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400" />
+                        <Key className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-mist/70" />
                         <input
                           type="text"
                           value={apiKeys.heygenCharacterId}
                           onChange={(e) => updateApiKey('heygenCharacterId', e.target.value)}
-                          placeholder="avatar_id"
-                          className="w-full pl-10 pr-4 py-3 rounded-xl border border-neutral-300 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-shadow text-sm"
+                          placeholder="avatar_id ou look_id (Digital Twin para Avatar V)"
+                          className="input-field pl-10 focus:ring-2 focus:ring-signal/25 focus:border-signal/50 outline-none transition-shadow text-sm"
                           disabled={isKeysLoading}
                         />
                       </div>
                     </div>
                     <div className="space-y-2">
                       <div className="flex items-center justify-between">
-                        <label className="text-sm font-medium text-neutral-700">Kling API Key</label>
+                        <label className="text-sm font-medium text-foam/85">Motor</label>
                         <button
                           type="button"
-                          onClick={() => setHelpModalKey('kling')}
-                          className="text-xs text-indigo-600 hover:text-indigo-700 inline-flex items-center gap-1"
+                          onClick={() => setHelpModalKey('heygenEngine')}
+                          className="text-xs text-signal hover:text-signal-dim inline-flex items-center gap-1"
+                        >
+                          <HelpCircle className="w-3.5 h-3.5" />
+                          Como obter
+                        </button>
+                      </div>
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        <button
+                          type="button"
+                          disabled={isKeysLoading}
+                          onClick={() => updateApiKey('heygenEngine', 'avatar_v')}
+                          className={`flex-1 px-4 py-3 rounded-xl text-sm font-medium border transition-colors ${
+                            apiKeys.heygenEngine === 'avatar_v'
+                              ? 'bg-signal text-signal-ink border-signal'
+                              : 'bg-panel text-foam/85 border-line hover:bg-ink-2'
+                          }`}
+                        >
+                          Avatar V
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isKeysLoading}
+                          onClick={() => updateApiKey('heygenEngine', 'avatar_iv')}
+                          className={`flex-1 px-4 py-3 rounded-xl text-sm font-medium border transition-colors ${
+                            apiKeys.heygenEngine !== 'avatar_v'
+                              ? 'bg-signal text-signal-ink border-signal'
+                              : 'bg-panel text-foam/85 border-line hover:bg-ink-2'
+                          }`}
+                        >
+                          Avatar IV
+                        </button>
+                      </div>
+                      <p className="text-xs text-mist">
+                        {apiKeys.heygenEngine === 'avatar_v'
+                          ? 'Avatar V precisa de um look Digital Twin elegível. O servidor valida antes de gerar.'
+                          : 'Avatar IV funciona com a maioria dos avatares.'}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="w-full h-px bg-panel-2 my-6"></div>
+
+                  <div className="space-y-4">
+                    <h3 className="text-lg font-semibold flex items-center gap-2">
+                      <Mic className="w-5 h-5 text-mist" />
+                      ElevenLabs — áudio (opcional)
+                    </h3>
+                    <p className="text-xs text-mist -mt-2">
+                      Opcional. Só gera o ficheiro de voz; o avatar continua no HeyGen.
+                    </p>
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label className="text-sm font-medium text-foam/85">ElevenLabs API Key</label>
+                        <button
+                          type="button"
+                          onClick={() => setHelpModalKey('elevenlabs')}
+                          className="text-xs text-signal hover:text-signal-dim inline-flex items-center gap-1"
                         >
                           <HelpCircle className="w-3.5 h-3.5" />
                           Como obter
                         </button>
                       </div>
                       <div className="relative">
-                        <Key className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400" />
+                        <Key className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-mist/70" />
+                        <input
+                          type="password"
+                          value={apiKeys.elevenlabs}
+                          onChange={(e) => updateApiKey('elevenlabs', e.target.value)}
+                          placeholder="sk_..."
+                          className="input-field pl-10 focus:ring-2 focus:ring-signal/25 focus:border-signal/50 outline-none transition-shadow text-sm"
+                          disabled={isKeysLoading}
+                        />
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label className="text-sm font-medium text-foam/85">ElevenLabs Voice ID</label>
+                        <button
+                          type="button"
+                          onClick={() => setHelpModalKey('elevenlabsVoiceId')}
+                          className="text-xs text-signal hover:text-signal-dim inline-flex items-center gap-1"
+                        >
+                          <HelpCircle className="w-3.5 h-3.5" />
+                          Como obter
+                        </button>
+                      </div>
+                      <div className="relative">
+                        <Key className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-mist/70" />
+                        <input
+                          type="text"
+                          value={apiKeys.elevenlabsVoiceId}
+                          onChange={(e) => updateApiKey('elevenlabsVoiceId', e.target.value)}
+                          placeholder="My Voices → copie o voice_id"
+                          className="input-field pl-10 focus:ring-2 focus:ring-signal/25 focus:border-signal/50 outline-none transition-shadow text-sm"
+                          disabled={isKeysLoading}
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="w-full h-px bg-panel-2 my-6"></div>
+
+                  <div className="space-y-4">
+                    <h3 className="text-lg font-semibold flex items-center gap-2">
+                      <Video className="w-5 h-5 text-mist" />
+                      Outros
+                    </h3>
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label className="text-sm font-medium text-foam/85">Kling API Key</label>
+                        <button
+                          type="button"
+                          onClick={() => setHelpModalKey('kling')}
+                          className="text-xs text-signal hover:text-signal-dim inline-flex items-center gap-1"
+                        >
+                          <HelpCircle className="w-3.5 h-3.5" />
+                          Como obter
+                        </button>
+                      </div>
+                      <div className="relative">
+                        <Key className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-mist/70" />
                         <input
                           type="password"
                           value={apiKeys.kling}
                           onChange={(e) => updateApiKey('kling', e.target.value)}
                           placeholder="Insira sua chave do Kling..."
-                          className="w-full pl-10 pr-4 py-3 rounded-xl border border-neutral-300 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-shadow text-sm"
+                          className="input-field pl-10 focus:ring-2 focus:ring-signal/25 focus:border-signal/50 outline-none transition-shadow text-sm"
                           disabled={isKeysLoading}
                         />
                       </div>
                     </div>
                   </div>
                   
-                  <div className="mt-8 p-4 bg-amber-50 border border-amber-200 rounded-xl flex gap-3 text-amber-800 text-sm">
+                  <div className="mt-8 p-4 bg-warn/10 border border-warn/30 rounded-xl flex gap-3 text-warn text-sm">
                     <AlertCircle className="w-5 h-5 shrink-0" />
                     <p>
                       <strong>Aviso de Segurança:</strong> As chaves ficam no Firestore da sua conta. Para producao, o ideal e criptografar antes de salvar e acessar provedores por rotas server-side.
@@ -1908,19 +2135,19 @@ export default function Home() {
                 </div>
 
                 {helpModalKey && (
-                  <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
-                    <div className="w-full max-w-lg bg-white rounded-2xl border border-neutral-200 shadow-xl p-6 space-y-4">
+                  <div className="fixed inset-0 z-50 bg-ink/80 backdrop-blur-sm flex items-center justify-center p-4">
+                    <div className="w-full max-w-lg panel p-6 space-y-4">
                       <div className="flex items-start justify-between gap-4">
-                        <h4 className="text-lg font-semibold text-neutral-900">{KEY_HELP_CONTENT[helpModalKey].title}</h4>
+                        <h4 className="text-lg font-semibold text-foam">{KEY_HELP_CONTENT[helpModalKey].title}</h4>
                         <button
                           type="button"
                           onClick={() => setHelpModalKey(null)}
-                          className="text-neutral-500 hover:text-neutral-700"
+                          className="text-mist hover:text-foam/85"
                         >
                           <X className="w-5 h-5" />
                         </button>
                       </div>
-                      <ol className="list-decimal list-inside space-y-2 text-sm text-neutral-700">
+                      <ol className="list-decimal list-inside space-y-2 text-sm text-foam/85">
                         {KEY_HELP_CONTENT[helpModalKey].steps.map((step) => (
                           <li key={step}>{step}</li>
                         ))}
@@ -1929,7 +2156,7 @@ export default function Home() {
                         href={KEY_HELP_CONTENT[helpModalKey].link}
                         target="_blank"
                         rel="noreferrer"
-                        className="inline-flex text-sm text-indigo-600 hover:text-indigo-700"
+                        className="inline-flex text-sm text-signal hover:text-signal-dim"
                       >
                         Abrir pagina da plataforma
                       </a>
@@ -1946,51 +2173,49 @@ export default function Home() {
                 className="max-w-4xl space-y-8"
               >
                 <div>
-                  <h2 className="text-2xl font-bold tracking-tight">Conteúdos Gerados</h2>
-                  <p className="text-neutral-500 mt-1">Histórico completo de inputs e saídas geradas no seu usuário.</p>
+                  <h2 className="font-display text-3xl font-bold tracking-tight">Biblioteca</h2>
+                  <p className="text-mist mt-1">Os seus vídeos e projetos.</p>
                 </div>
 
                 {isProjectsLoading ? (
-                  <div className="bg-white p-6 rounded-2xl border border-neutral-200 shadow-sm flex items-center gap-2 text-neutral-600">
+                  <div className="panel p-6  flex items-center gap-2 text-mist">
                     <Loader2 className="w-5 h-5 animate-spin" />
-                    Carregando conteúdos...
+                    A carregar…
                   </div>
                 ) : savedProjects.length === 0 ? (
-                  <div className="bg-white p-6 rounded-2xl border border-neutral-200 shadow-sm text-neutral-500">
-                    Nenhum conteúdo salvo ainda.
+                  <div className="panel p-6  text-mist">
+                    Ainda não há projetos.
                   </div>
                 ) : (
                   <div className="space-y-4">
                     {savedProjects.map((item) => (
-                      <div key={item.id} className="bg-white p-6 rounded-2xl border border-neutral-200 shadow-sm space-y-4">
+                      <div key={item.id} className="panel p-6  space-y-4">
                         <div className="flex items-center justify-between">
                           <div>
-                            <h3 className="font-semibold text-neutral-900">Projeto {item.id}</h3>
-                            <p className="text-xs text-neutral-500">{new Date(item.date).toLocaleString('pt-BR')}</p>
+                            <h3 className="font-semibold text-foam">Projeto {item.id}</h3>
+                            <p className="text-xs text-mist">{new Date(item.date).toLocaleString('pt-BR')}</p>
                           </div>
-                          <span className="text-xs px-2 py-1 rounded-full bg-neutral-100 text-neutral-700">
+                          <span className="text-xs px-2 py-1 rounded-full bg-panel-2 text-foam/85">
                             {item.status}
                           </span>
                         </div>
 
                         <div className="space-y-2">
-                          <p className="text-xs font-semibold uppercase tracking-wide text-neutral-500">Input (Material Bruto)</p>
-                          <div className="text-sm text-neutral-700 bg-neutral-50 p-3 rounded-lg whitespace-pre-wrap">
+                          <p className="text-xs font-semibold uppercase tracking-wide text-mist">Input (Material Bruto)</p>
+                          <div className="text-sm text-foam/85 bg-ink-2 p-3 rounded-lg whitespace-pre-wrap">
                             {item.rawMaterial}
                           </div>
                           {typeof item.targetVideoDurationSeconds === 'number' && item.targetVideoDurationSeconds > 0 ? (
-                            <p className="text-xs text-neutral-600">
-                              Duração prevista:{' '}
-                              {VIDEO_DURATION_PRESETS.find((o) => o.value === item.targetVideoDurationSeconds)?.label ??
-                                `${item.targetVideoDurationSeconds} s`}
+                            <p className="text-xs text-mist">
+                              Duração prevista: {item.targetVideoDurationSeconds} s
                             </p>
                           ) : null}
                         </div>
 
                         {item.promptInfo && (
                           <div className="space-y-2">
-                            <p className="text-xs font-semibold uppercase tracking-wide text-neutral-500">Notas para o vídeo (HeyGen)</p>
-                            <div className="text-sm text-neutral-700 bg-neutral-50 p-3 rounded-lg whitespace-pre-wrap">
+                            <p className="text-xs font-semibold uppercase tracking-wide text-mist">Notas para o vídeo (HeyGen)</p>
+                            <div className="text-sm text-foam/85 bg-ink-2 p-3 rounded-lg whitespace-pre-wrap">
                               {item.promptInfo}
                             </div>
                           </div>
@@ -1998,8 +2223,8 @@ export default function Home() {
 
                         {item.generatedScript && (
                           <div className="space-y-2">
-                            <p className="text-xs font-semibold uppercase tracking-wide text-neutral-500">Roteiro gerado</p>
-                            <div className="text-sm text-neutral-700 bg-neutral-50 p-3 rounded-lg whitespace-pre-wrap">
+                            <p className="text-xs font-semibold uppercase tracking-wide text-mist">Roteiro gerado</p>
+                            <div className="text-sm text-foam/85 bg-ink-2 p-3 rounded-lg whitespace-pre-wrap">
                               {item.generatedScript}
                             </div>
                           </div>
@@ -2008,12 +2233,12 @@ export default function Home() {
                         {(item.audioUrl || item.videoUrl) && (
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
                             {item.audioUrl && (
-                              <a href={item.audioUrl} target="_blank" rel="noreferrer" className="text-indigo-600 hover:text-indigo-700">
+                              <a href={item.audioUrl} target="_blank" rel="noreferrer" className="text-signal hover:text-signal-dim">
                                 Abrir áudio gerado
                               </a>
                             )}
                             {item.videoUrl && (
-                              <a href={item.videoUrl} target="_blank" rel="noreferrer" className="text-indigo-600 hover:text-indigo-700">
+                              <a href={item.videoUrl} target="_blank" rel="noreferrer" className="text-signal hover:text-signal-dim">
                                 Abrir vídeo gerado
                               </a>
                             )}
@@ -2028,6 +2253,9 @@ export default function Home() {
           </AnimatePresence>
         </div>
       </main>
+      </div>
+
+      <SiteFooter />
     </div>
   );
 }
@@ -2055,10 +2283,10 @@ function StatusItem({
       }`}
     >
       <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
-        status === 'pending' ? 'bg-neutral-100 text-neutral-400' :
-        status === 'loading' ? 'bg-indigo-100 text-indigo-600' :
-        status === 'error' ? 'bg-red-100 text-red-600' :
-        'bg-emerald-100 text-emerald-600'
+        status === 'pending' ? 'bg-panel-2 text-mist/70' :
+        status === 'loading' ? 'bg-signal/15 text-signal' :
+        status === 'error' ? 'bg-warm/15 text-warm' :
+        'bg-ok/15 text-ok'
       }`}>
         {status === 'loading' ? <Loader2 className="w-4 h-4 animate-spin" /> :
          status === 'success' ? <CheckCircle2 className="w-4 h-4" /> :
@@ -2066,10 +2294,10 @@ function StatusItem({
          icon}
       </div>
       <span className={`text-sm font-medium ${
-        status === 'pending' ? 'text-neutral-500' :
-        status === 'loading' ? 'text-indigo-700' :
-        status === 'error' ? 'text-red-700' :
-        'text-emerald-700'
+        status === 'pending' ? 'text-mist' :
+        status === 'loading' ? 'text-signal' :
+        status === 'error' ? 'text-warm' :
+        'text-ok'
       }`}>
         {label}
       </span>

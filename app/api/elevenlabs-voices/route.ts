@@ -30,6 +30,15 @@ export async function POST(request: Request) {
 
     if (!res.ok) {
       const t = await res.text();
+      if (res.status === 401) {
+        return NextResponse.json(
+          {
+            error:
+              'Chave ElevenLabs invalida ou expirada. Atualize em Configuracoes ou use o modo "Voz do HeyGen" para pular o ElevenLabs.',
+          },
+          { status: 502 }
+        );
+      }
       try {
         const parsed = JSON.parse(t) as {
           detail?: { status?: string; message?: string; code?: string };

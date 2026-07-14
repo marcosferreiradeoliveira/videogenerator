@@ -129,18 +129,18 @@ export async function POST(request: Request) {
       );
     }
 
-    const prompt = `Você é um roteirista de telejornal. Transforme o seguinte material bruto em um roteiro jornalístico para vídeo com narração em voz alta.
+    const prompt = `Você escreve roteiros curtos para vídeo com avatar e narração em voz alta. Transforme o texto abaixo num roteiro claro, pronto para ser falado.
 
 Comprimento do roteiro (obrigatório):
 - Duração prevista do vídeo (narração): aproximadamente ${targetVideoDurationSeconds} segundos.
-- O roteiro deve ter entre ${wordMin} e ${wordMax} palavras (alvo ~${wordApprox} palavras), proporcional a esse tempo, em ritmo de telejornal claro, sem enrolação nem trechos supérfluos.
+- O roteiro deve ter entre ${wordMin} e ${wordMax} palavras (alvo ~${wordApprox} palavras), proporcional a esse tempo, em ritmo natural e direto, sem enrolação nem trechos supérfluos.
 
 ${SCRIPT_INSTRUCTIONS}
 
-Material Bruto:
+Texto de origem:
 ${rawMaterial}
 
-${promptInfo ? `Instruções Adicionais de Tom/Estilo: ${promptInfo}` : ''}`;
+${promptInfo ? `Instruções adicionais de tom/estilo: ${promptInfo}` : ''}`;
 
     let generatedScript = '';
 
@@ -163,7 +163,7 @@ ${promptInfo ? `Instruções Adicionais de Tom/Estilo: ${promptInfo}` : ''}`;
           messages: [
             {
               role: 'system',
-              content: `Você é um roteirista de telejornal. ${SCRIPT_INSTRUCTIONS}`,
+              content: `Você escreve roteiros curtos para vídeo com avatar. ${SCRIPT_INSTRUCTIONS}`,
             },
             { role: 'user', content: prompt },
           ],

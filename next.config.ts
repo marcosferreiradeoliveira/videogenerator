@@ -21,6 +21,14 @@ const nextConfig: NextConfig = {
   },
   // Só em `next build` (produção / Firebase App Hosting). Evita artefactos de standalone em `next dev`.
   ...(process.env.NODE_ENV === 'production' ? {output: 'standalone' as const} : {}),
+  // Binários nativos — não empacotar com webpack (quebra o path do executável).
+  serverExternalPackages: ['ffmpeg-static', 'ffprobe-static'],
+  outputFileTracingIncludes: {
+    '/api/translate-video': [
+      './node_modules/ffmpeg-static/**/*',
+      './node_modules/ffprobe-static/**/*',
+    ],
+  },
   transpilePackages: ['motion'],
   webpack: (config, {dev}) => {
     // HMR is disabled in AI Studio via DISABLE_HMR env var.
